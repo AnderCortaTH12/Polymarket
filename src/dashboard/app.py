@@ -23,9 +23,16 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from src.analysis.whales import Whale, rank_whales
 from src.client.clob import get_price_history
+from src.client.data_api import get_user_positions
 from src.client.gamma import flatten_markets, get_politics_events
 from src.collector.models import DB_PATH
+
+# Cuantos mercados (por volumen) se agregan para rankear ballenas. Limitar
+# mantiene el numero de llamadas a la Data API razonable.
+WHALE_MARKETS_SAMPLE: int = 12
+WHALE_TOP_N: int = 50
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +57,28 @@ def load_price_history(token_id: str, interval: str) -> pd.DataFrame:
     df = pd.DataFrame(history)
     df["fecha"] = pd.to_datetime(df["t"], unit="s")
     return df.set_index("fecha")[["p"]].rename(columns={"p": "precio"})
+
+
+@st.cache_data(ttl=300)
+def load_whales(condition_ids: tuple[str, ...], top_n: int = WHALE_TOP_N) -> list[Whale]:
+    """Rankea las top ballenas por exposicion en los mercados dados. Cacheado 5 min.
+
+    Recibe una tupla (hashable) de condition_ids para que Streamlit pueda cachear.
+    """
+    return rank_whales(list(condition_ids), top_n=top_n)
+
+
+@st.cache_data(ttl=300)
+def load_user_positions(wallet: str) -> pd.DataFrame:
+    """Cartera COMPLETA (todos los mercados) de una wallet como DataFrame. Cacheado 5 min.
+
+    La cartera completa (no solo politica) permite calcular el % real de cada
+    posicion sobre el total.
+    """
+    positions = get_user_positions(wallet, limit=500)
+    if not positions:
+        return pd.DataFrame()
+    return pd.DataFrame(positions)
 
 
 def collector_status() -> dict[str, Any]:
@@ -185,6 +214,119 @@ def render_detail(markets: list[dict[str, Any]]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Seccion 4 — ballenas
+# --------------------------------------------------------------------------- #
+def _short(addr: str) -> str:
+    """Acorta una direccion (0xabcd...1234) para mostrarla en tablas."""
+    return f"{addr[:6]}...{addr[-4:]}" if addr and len(addr) > 12 else addr
+
+
+def render_whales(markets: list[dict[str, Any]]) -> None:
+    """Top ballenas y, al seleccionar una, la foto actual de su cartera completa."""
+    st.subheader("🐋 Ballenas")
+    st.caption(
+        "Foto ACTUAL (no historico). Las ballenas se rankean por su exposicion "
+        f"agregada en los {WHALE_MARKETS_SAMPLE} mercados de politica de mayor volumen."
+    )
+
+    # condition_ids de los mercados de politica con mas volumen (para agregar holders).
+    con_markets = [m for m in markets if m.get("condition_id")]
+    con_markets.sort(key=lambda m: m["volume_24h"] or 0, reverse=True)
+    condition_ids = tuple(dict.fromkeys(m["condition_id"] for m in con_markets[:WHALE_MARKETS_SAMPLE]))
+    politics_conditions = {m["condition_id"] for m in con_markets}
+
+    if not condition_ids:
+        st.info("No hay mercados con condition_id para rankear ballenas.")
+        return
+
+    with st.spinner("Rankeando ballenas..."):
+        whales = load_whales(condition_ids)
+    if not whales:
+        st.info("No se han encontrado holders en estos mercados.")
+        return
+
+    whale_df = pd.DataFrame([
+        {
+            "Wallet": _short(w.proxy_wallet),
+            "Exposicion (politica)": w.total_amount,
+            "Nº mercados": len(w.markets),
+            "_wallet": w.proxy_wallet,
+        }
+        for w in whales
+    ]).sort_values("Exposicion (politica)", ascending=False)
+
+    st.dataframe(
+        whale_df.drop(columns="_wallet"),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Exposicion (politica)": st.column_config.NumberColumn(format="%.0f"),
+        },
+    )
+
+    # --- Detalle de la cartera de una ballena --------------------------------
+    st.markdown("#### Cartera de una ballena")
+    options = {f"{_short(w.proxy_wallet)}  ({w.total_amount:,.0f})": w.proxy_wallet for w in whales}
+    label = st.selectbox("Wallet", list(options.keys()))
+    wallet = options[label]
+    st.caption(f"Wallet completa: `{wallet}`")
+
+    with st.spinner("Cargando cartera..."):
+        positions = load_user_positions(wallet)
+    if positions.empty:
+        st.warning("Esta wallet no tiene posiciones abiertas ahora mismo.")
+        return
+
+    # % de cartera = valor actual de la posicion / valor total de la cartera.
+    positions["currentValue"] = pd.to_numeric(positions.get("currentValue"), errors="coerce").fillna(0.0)
+    total_value = positions["currentValue"].sum()
+    positions["pct_cartera"] = positions["currentValue"] / total_value if total_value else 0.0
+    if "conditionId" in positions.columns:
+        positions["es_politica"] = positions["conditionId"].isin(politics_conditions)
+    else:
+        positions["es_politica"] = False
+
+    politics_value = positions.loc[positions["es_politica"], "currentValue"].sum()
+    pct_politics = politics_value / total_value if total_value else 0.0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Valor cartera", f"${total_value:,.0f}")
+    c2.metric("Posiciones", len(positions))
+    c3.metric("% en politica", f"{pct_politics:.0%}", help="Nuestro foco de analisis")
+
+    table = pd.DataFrame({
+        "Mercado": positions.get("title"),
+        "Política": positions["es_politica"].map({True: "🟢", False: ""}),
+        "Tamaño": pd.to_numeric(positions.get("size"), errors="coerce"),
+        "Precio medio": pd.to_numeric(positions.get("avgPrice"), errors="coerce"),
+        "Valor actual": positions["currentValue"],
+        "PnL": pd.to_numeric(positions.get("cashPnl"), errors="coerce"),
+        "% cartera": positions["pct_cartera"],
+    }).sort_values("Valor actual", ascending=False)
+
+    st.dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Valor actual": st.column_config.NumberColumn(format="$%.2f"),
+            "PnL": st.column_config.NumberColumn(format="$%.2f"),
+            "% cartera": st.column_config.ProgressColumn("% cartera", min_value=0, max_value=1, format="%.0f%%"),
+        },
+    )
+
+    # Distribucion de la cartera entre mercados (top 15 por valor).
+    st.markdown("#### Distribución de la cartera")
+    chart_data = (
+        table[["Mercado", "Valor actual"]]
+        .dropna(subset=["Mercado"])
+        .head(15)
+        .set_index("Mercado")
+    )
+    st.bar_chart(chart_data)
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 def main() -> None:
@@ -198,9 +340,13 @@ def main() -> None:
         st.error(f"Error cargando mercados: {exc}")
         return
 
-    render_overview(markets)
-    st.divider()
-    render_detail(markets)
+    tab_overview, tab_detail, tab_whales = st.tabs(["📊 Vista general", "🔍 Detalle", "🐋 Ballenas"])
+    with tab_overview:
+        render_overview(markets)
+    with tab_detail:
+        render_detail(markets)
+    with tab_whales:
+        render_whales(markets)
 
     if cfg["auto"]:
         time.sleep(cfg["every"])
