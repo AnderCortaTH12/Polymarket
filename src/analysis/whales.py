@@ -1,24 +1,20 @@
 """Identificacion de ballenas en Polymarket Politics (FASE 5).
 
-Parte funcional: agregar los mayores holders de un conjunto de mercados para
-rankear las wallets con mayor exposicion en politica. Parte esqueleto (se
-detalla mas adelante): cruzar cada wallet con su historial on-chain via
-Polygonscan y detectar wallets que comparten la misma fuente de fondos.
+Rankea las wallets con mayor exposicion en politica agregando los mayores
+holders de un conjunto de mercados, y cruza cada wallet con su historial
+on-chain via Polygonscan para detectar wallets que comparten la misma fuente
+de fondos (posible misma persona/entidad tras varias cuentas).
 """
 from __future__ import annotations
 
 import logging
-import os
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
 
 from src.client.data_api import get_market_holders
+from src.client.polygonscan import get_first_transactions
 
 logger = logging.getLogger(__name__)
-
-# Clave gratuita de Polygonscan para el cruce on-chain (ver .env.example).
-POLYGONSCAN_API_KEY_ENV: str = "POLYGONSCAN_API_KEY"
 
 
 @dataclass
@@ -56,24 +52,34 @@ def rank_whales(condition_ids: list[str], top_n: int = 20) -> list[Whale]:
 # --------------------------------------------------------------------------- #
 # Esqueleto — cruce on-chain (se implementa cuando tengamos la API key)
 # --------------------------------------------------------------------------- #
-def get_wallet_funding_source(proxy_wallet: str) -> str | None:
-    """[ESQUELETO] Wallet que fondeo por primera vez a `proxy_wallet` (via Polygonscan).
+def get_wallet_funding_source(wallet_address: str) -> str | None:
+    """Wallet que financio originalmente a `wallet_address`, via Polygonscan.
 
-    Requiere POLYGONSCAN_API_KEY. Pendiente de implementar en FASE 5 detallada:
-    consultar la primera transaccion entrante de la wallet en Polygon.
+    Toma la primera transaccion ENTRANTE de la wallet y devuelve su remitente
+    (`from`). Si la wallet no tiene transacciones entrantes, devuelve None.
     """
-    if not os.getenv(POLYGONSCAN_API_KEY_ENV):
-        logger.warning("Falta %s; el cruce on-chain no esta disponible aun.", POLYGONSCAN_API_KEY_ENV)
-    raise NotImplementedError("Cruce on-chain via Polygonscan pendiente (FASE 5 detallada)")
+    txs = get_first_transactions(wallet_address, limit=1)
+    if not txs:
+        logger.info("Wallet %s sin transacciones entrantes; sin funding source", wallet_address)
+        return None
+    return txs[0].get("from")
 
 
 def group_by_funding_source(whales: list[Whale]) -> dict[str, list[str]]:
-    """[ESQUELETO] Agrupa wallets que comparten la misma fuente de fondos.
+    """Agrupa wallets que comparten la misma fuente de fondos.
 
-    Detectaria clusters (posible misma persona/entidad tras varias wallets).
-    Pendiente hasta tener `get_wallet_funding_source` operativo.
+    Para cada ballena obtiene su funding source y agrupa por el. Devuelve solo
+    los grupos con mas de una wallet: los interesantes, porque sugieren una
+    misma persona/entidad operando varias cuentas.
     """
-    raise NotImplementedError("Deteccion de funding compartido pendiente (FASE 5 detallada)")
+    by_source: dict[str, list[str]] = defaultdict(list)
+    for whale in whales:
+        source = get_wallet_funding_source(whale.proxy_wallet)
+        if source:
+            by_source[source].append(whale.proxy_wallet)
+    clusters = {src: wallets for src, wallets in by_source.items() if len(wallets) > 1}
+    logger.info("%d wallets -> %d clusters de funding compartido", len(whales), len(clusters))
+    return clusters
 
 
 def _main() -> None:
