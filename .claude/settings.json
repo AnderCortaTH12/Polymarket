@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(./.venv/Scripts/python.exe -c ' *)",
-      "Bash(git -c user.name=AnderCortaTH12 -c user.email=nexxo2003@gmail.com commit -q -m 'FASE 5 \\(parte 1\\): funding source via USDC.e en vez de MATIC nativo *)"
-    ]
-  }
-}
