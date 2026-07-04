@@ -293,6 +293,7 @@ def render_whales(markets: list[dict[str, Any]]) -> None:
     table = pd.DataFrame({
         "Mercado": positions.get("title"),
         "Política": positions["es_politica"].map({True: "🟢", False: ""}),
+        "Apuesta": positions.get("outcome"),  # de qué lado está: Yes/No (Sí/No)
         "Tamaño": pd.to_numeric(positions.get("size"), errors="coerce"),
         "Precio medio": pd.to_numeric(positions.get("avgPrice"), errors="coerce"),
         "Valor actual": positions["currentValue"],
