@@ -12,7 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from src.client.data_api import get_market_holders
-from src.client.polygonscan import get_first_transactions
+from src.client.polygonscan import get_first_token_transfers, get_first_transactions
 
 logger = logging.getLogger(__name__)
 
@@ -52,31 +52,43 @@ def rank_whales(condition_ids: list[str], top_n: int = 20) -> list[Whale]:
 # --------------------------------------------------------------------------- #
 # Esqueleto — cruce on-chain (se implementa cuando tengamos la API key)
 # --------------------------------------------------------------------------- #
-def get_wallet_funding_source(wallet_address: str) -> str | None:
+def get_wallet_funding_source(wallet_address: str) -> tuple[str, str] | None:
     """Wallet que financio originalmente a `wallet_address`, via Polygonscan.
 
-    Toma la primera transaccion ENTRANTE de la wallet y devuelve su remitente
-    (`from`). Si la wallet no tiene transacciones entrantes, devuelve None.
+    Metodo principal: primera transferencia ENTRANTE de USDC.e (asi se financian
+    las proxy wallets de Polymarket). Fallback: primera transaccion nativa
+    entrante (MATIC), por si la wallet se fondeo de otra forma.
+
+    Returns:
+        Tupla (funder_address, metodo) donde metodo es "usdc" o "native"; o
+        None si no se encuentra ninguna transaccion entrante.
     """
+    transfers = get_first_token_transfers(wallet_address, limit=1)
+    if transfers:
+        return transfers[0].get("from"), "usdc"
+
     txs = get_first_transactions(wallet_address, limit=1)
-    if not txs:
-        logger.info("Wallet %s sin transacciones entrantes; sin funding source", wallet_address)
-        return None
-    return txs[0].get("from")
+    if txs:
+        return txs[0].get("from"), "native"
+
+    logger.info("Wallet %s sin entradas (USDC ni nativas); sin funding source", wallet_address)
+    return None
 
 
 def group_by_funding_source(whales: list[Whale]) -> dict[str, list[str]]:
     """Agrupa wallets que comparten la misma fuente de fondos.
 
-    Para cada ballena obtiene su funding source y agrupa por el. Devuelve solo
-    los grupos con mas de una wallet: los interesantes, porque sugieren una
-    misma persona/entidad operando varias cuentas.
+    Para cada ballena obtiene su funding source (independientemente del metodo,
+    USDC o nativo) y agrupa por la direccion del funder. Devuelve solo los
+    grupos con mas de una wallet: los interesantes, porque sugieren una misma
+    persona/entidad operando varias cuentas.
     """
     by_source: dict[str, list[str]] = defaultdict(list)
     for whale in whales:
-        source = get_wallet_funding_source(whale.proxy_wallet)
-        if source:
-            by_source[source].append(whale.proxy_wallet)
+        result = get_wallet_funding_source(whale.proxy_wallet)
+        if result:
+            funder, _method = result
+            by_source[funder].append(whale.proxy_wallet)
     clusters = {src: wallets for src, wallets in by_source.items() if len(wallets) > 1}
     logger.info("%d wallets -> %d clusters de funding compartido", len(whales), len(clusters))
     return clusters

@@ -26,6 +26,14 @@ POLYGONSCAN_BASE_URL: str = "https://api.etherscan.io/v2/api"
 POLYGON_CHAIN_ID: int = 137
 POLYGONSCAN_API_KEY_ENV: str = "POLYGONSCAN_API_KEY"
 
+# Contratos de USDC en Polygon. Las proxy wallets de Polymarket se financian
+# con USDC.e (USDC puenteado), que es el que aparece de verdad en las wallets
+# de prueba; por eso es el contrato por defecto. Se deja tambien el USDC nativo
+# como referencia por si en el futuro cambian.
+USDC_E_CONTRACT_POLYGON: str = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"  # USDC.e (puenteado)
+USDC_NATIVE_CONTRACT_POLYGON: str = "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"  # USDC nativo
+USDC_CONTRACT_POLYGON: str = USDC_E_CONTRACT_POLYGON
+
 # Rate limit del plan gratuito: 5 req/segundo. Dejamos un pequeno margen.
 MIN_INTERVAL_SECONDS: float = 0.22
 
@@ -96,11 +104,7 @@ def get_first_transactions(wallet_address: str, limit: int = 10) -> list[dict[st
     Returns:
         Lista de transacciones (dicts crudos de Polygonscan), orden cronologico.
     """
-    api_key = _get_api_key()
-    _throttle()
-
     params = {
-        "chainid": POLYGON_CHAIN_ID,
         "module": "account",
         "action": "txlist",
         "address": wallet_address,
@@ -109,23 +113,76 @@ def get_first_transactions(wallet_address: str, limit: int = 10) -> list[dict[st
         "page": 1,
         "offset": 100,  # traemos un bloque y filtramos entrantes en el cliente
         "sort": "asc",
-        "apikey": api_key,
     }
-    payload = get_json(POLYGONSCAN_BASE_URL, params=params)
+    return _fetch_incoming(wallet_address, params, action="txlist", limit=limit)
+
+
+def get_first_token_transfers(
+    wallet_address: str,
+    contract_address: str = USDC_CONTRACT_POLYGON,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Primeras transferencias ENTRANTES de un token ERC-20, mas antiguas primero.
+
+    Usa account/tokentx filtrando por `contractaddress`, ordenado ascendente, y
+    devuelve las que tienen a `wallet_address` como destinatario (`to`). Es el
+    metodo principal para el funding source de las proxy wallets de Polymarket,
+    que se financian con USDC.e (no con MATIC nativo).
+
+    Args:
+        wallet_address: direccion de la wallet a inspeccionar.
+        contract_address: contrato del token (por defecto USDC.e en Polygon).
+        limit: numero maximo de transferencias entrantes a devolver.
+
+    Returns:
+        Lista de transferencias (dicts crudos), orden cronologico.
+    """
+    params = {
+        "module": "account",
+        "action": "tokentx",
+        "address": wallet_address,
+        "contractaddress": contract_address,
+        "startblock": 0,
+        "endblock": 99999999,
+        "page": 1,
+        "offset": 100,
+        "sort": "asc",
+    }
+    return _fetch_incoming(wallet_address, params, action="tokentx", limit=limit)
+
+
+def _fetch_incoming(
+    wallet_address: str,
+    params: dict[str, Any],
+    *,
+    action: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Llama al endpoint, filtra las entrantes (`to == wallet`) y aplica el limite.
+
+    Centraliza la key, el throttle de rate limit y el parseo de la respuesta
+    (status "0" / result no-lista se tratan como "sin resultados").
+    """
+    api_key = _get_api_key()
+    _throttle()
+
+    full_params = {"chainid": POLYGON_CHAIN_ID, **params, "apikey": api_key}
+    payload = get_json(POLYGONSCAN_BASE_URL, params=full_params)
 
     result = payload.get("result") if isinstance(payload, dict) else None
     if not isinstance(result, list):
         # status "0" con mensaje (p.ej. "No transactions found") o error de la API.
         logger.info(
-            "Polygonscan txlist %s: sin resultados (%s)",
-            wallet_address, payload.get("message") if isinstance(payload, dict) else payload,
+            "Polygonscan %s %s: sin resultados (%s)",
+            action, wallet_address,
+            payload.get("message") if isinstance(payload, dict) else payload,
         )
         return []
 
     target = wallet_address.lower()
     incoming = [tx for tx in result if str(tx.get("to", "")).lower() == target]
     logger.info(
-        "Polygonscan txlist %s: %d tx totales, %d entrantes (limit %d)",
-        wallet_address, len(result), len(incoming), limit,
+        "Polygonscan %s %s: %d totales, %d entrantes (limit %d)",
+        action, wallet_address, len(result), len(incoming), limit,
     )
     return incoming[:limit]

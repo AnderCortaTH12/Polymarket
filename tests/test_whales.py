@@ -1,8 +1,9 @@
 """Tests del cruce on-chain de ballenas, con Polygonscan mockeado.
 
-No gastan rate limit real: se parchea `get_first_transactions` para verificar
-que `get_wallet_funding_source` y `group_by_funding_source` parsean e
-interpretan bien la respuesta.
+No gastan rate limit real: se parchean `get_first_token_transfers` (USDC) y
+`get_first_transactions` (nativo, fallback) para verificar que
+`get_wallet_funding_source` y `group_by_funding_source` parsean e interpretan
+bien la respuesta.
 """
 import unittest
 from unittest.mock import patch
@@ -15,54 +16,62 @@ from src.analysis.whales import (
 
 WALLET = "0xAaAa000000000000000000000000000000000001"
 FUNDER = "0xF00000000000000000000000000000000000000A"
+FUNDER_NATIVE = "0xF00000000000000000000000000000000000000B"
 
 
 def _tx(from_addr: str, to_addr: str, ts: str) -> dict:
-    """Transaccion cruda al estilo de Polygonscan (solo los campos que usamos)."""
+    """Transferencia/transaccion cruda al estilo de Polygonscan (campos que usamos)."""
     return {"from": from_addr, "to": to_addr, "timeStamp": ts, "value": "1000"}
 
 
 class TestGetWalletFundingSource(unittest.TestCase):
-    """Verifica la extraccion del remitente de la primera tx entrante."""
+    """Verifica USDC como metodo principal y el fallback a tx nativa."""
+
+    @patch("src.analysis.whales.get_first_token_transfers")
+    def test_usa_usdc_como_principal(self, mock_usdc) -> None:
+        mock_usdc.return_value = [_tx(FUNDER, WALLET, "1700000000")]
+        self.assertEqual(get_wallet_funding_source(WALLET), (FUNDER, "usdc"))
+        mock_usdc.assert_called_once_with(WALLET, limit=1)
 
     @patch("src.analysis.whales.get_first_transactions")
-    def test_devuelve_remitente_de_primera_entrante(self, mock_txs) -> None:
-        mock_txs.return_value = [_tx(FUNDER, WALLET, "1700000000")]
-        self.assertEqual(get_wallet_funding_source(WALLET), FUNDER)
-        mock_txs.assert_called_once_with(WALLET, limit=1)
+    @patch("src.analysis.whales.get_first_token_transfers")
+    def test_fallback_a_nativo_si_no_hay_usdc(self, mock_usdc, mock_native) -> None:
+        mock_usdc.return_value = []  # sin transferencias USDC
+        mock_native.return_value = [_tx(FUNDER_NATIVE, WALLET, "1700000000")]
+        self.assertEqual(get_wallet_funding_source(WALLET), (FUNDER_NATIVE, "native"))
+        mock_native.assert_called_once_with(WALLET, limit=1)
 
     @patch("src.analysis.whales.get_first_transactions")
-    def test_sin_transacciones_entrantes_devuelve_none(self, mock_txs) -> None:
-        mock_txs.return_value = []
+    @patch("src.analysis.whales.get_first_token_transfers")
+    def test_sin_entradas_devuelve_none(self, mock_usdc, mock_native) -> None:
+        mock_usdc.return_value = []
+        mock_native.return_value = []
         self.assertIsNone(get_wallet_funding_source(WALLET))
 
 
 class TestGroupByFundingSource(unittest.TestCase):
     """Verifica que solo se devuelven los clusters con mas de una wallet."""
 
-    @patch("src.analysis.whales.get_first_transactions")
-    def test_agrupa_wallets_con_mismo_funder(self, mock_txs) -> None:
-        w1 = Whale(proxy_wallet="0xw1")
-        w2 = Whale(proxy_wallet="0xw2")
-        w3 = Whale(proxy_wallet="0xw3")
+    @patch("src.analysis.whales.get_first_transactions", return_value=[])
+    @patch("src.analysis.whales.get_first_token_transfers")
+    def test_agrupa_wallets_con_mismo_funder(self, mock_usdc, _mock_native) -> None:
+        w1, w2, w3 = Whale("0xw1"), Whale("0xw2"), Whale("0xw3")
 
-        # w1 y w2 comparten FUNDER; w3 tiene otro (no forma cluster).
+        # w1 y w2 comparten FUNDER (via USDC); w3 tiene otro (no forma cluster).
         sources = {
             "0xw1": [_tx(FUNDER, "0xw1", "1")],
             "0xw2": [_tx(FUNDER, "0xw2", "2")],
             "0xw3": [_tx("0xOTHER", "0xw3", "3")],
         }
-        mock_txs.side_effect = lambda addr, limit=1: sources[addr]
+        mock_usdc.side_effect = lambda addr, limit=1: sources[addr]
 
         clusters = group_by_funding_source([w1, w2, w3])
         self.assertEqual(clusters, {FUNDER: ["0xw1", "0xw2"]})
 
-    @patch("src.analysis.whales.get_first_transactions")
-    def test_ignora_wallets_sin_funding(self, mock_txs) -> None:
-        w1 = Whale(proxy_wallet="0xw1")
-        w2 = Whale(proxy_wallet="0xw2")
-        mock_txs.side_effect = lambda addr, limit=1: []  # ninguna con entrantes
-        self.assertEqual(group_by_funding_source([w1, w2]), {})
+    @patch("src.analysis.whales.get_first_transactions", return_value=[])
+    @patch("src.analysis.whales.get_first_token_transfers", return_value=[])
+    def test_ignora_wallets_sin_funding(self, _mock_usdc, _mock_native) -> None:
+        self.assertEqual(group_by_funding_source([Whale("0xw1"), Whale("0xw2")]), {})
 
 
 if __name__ == "__main__":
