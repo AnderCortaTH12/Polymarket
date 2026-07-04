@@ -1,0 +1,9 @@
+# Tema del dashboard. Paleta propia (off-white editorial + acento teal) para
+# alejarse de los defaults de Streamlit. Los secrets van aparte (no versionados).
+[theme]
+base = "light"
+primaryColor = "#0E7C66"            # acento teal (botones, selecciones, barras)
+backgroundColor = "#FBFAF8"         # off-white cálido
+secondaryBackgroundColor = "#F0EEE9"  # paneles / sidebar
+textColor = "#1A1A1A"
+font = "sans serif"

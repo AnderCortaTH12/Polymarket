@@ -36,7 +36,27 @@ WHALE_TOP_N: int = 50
 
 logger = logging.getLogger(__name__)
 
-st.set_page_config(page_title="Polymarket Politics", page_icon="🗳️", layout="wide")
+st.set_page_config(
+    page_title="Polymarket Politics",
+    page_icon=":material/insights:",  # icono monocromo Material, no emoji decorativo
+    layout="wide",
+)
+
+# Retoques de tipografia y espaciado para una estetica mas cuidada y propia.
+_CUSTOM_CSS = """
+<style>
+  .block-container { padding-top: 2.2rem; max-width: 1200px; }
+  h1 { font-weight: 700; letter-spacing: -0.02em; }
+  h2, h3 { font-weight: 600; letter-spacing: -0.01em; }
+  /* Regla fina bajo la cabecera */
+  .app-header { border-bottom: 1px solid #E5E1D8; padding-bottom: .6rem; margin-bottom: 1.2rem; }
+  .app-header .subtitle { color: #6B6659; font-size: .95rem; margin-top: .1rem; }
+  /* Pestañas mas sobrias */
+  button[data-baseweb="tab"] { font-weight: 600; }
+  [data-testid="stMetricValue"] { font-weight: 700; }
+</style>
+"""
+st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -108,7 +128,7 @@ def _prob(row: dict[str, Any]) -> float | None:
 # --------------------------------------------------------------------------- #
 def render_sidebar() -> dict[str, Any]:
     """Dibuja el sidebar y devuelve la configuracion elegida por el usuario."""
-    st.sidebar.header("⚙️ Panel de control")
+    st.sidebar.header("Panel de control")
     auto = st.sidebar.toggle("Auto-refresco", value=False)
     every = st.sidebar.slider("Refrescar cada (s)", 30, 300, 60, step=10)
 
@@ -131,7 +151,7 @@ def render_sidebar() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 def render_overview(markets: list[dict[str, Any]]) -> None:
     """Tabla de mercados con metricas de cabecera, buscador y filtro de volumen."""
-    st.subheader("📊 Vista general")
+    st.subheader("Vista general")
 
     total_vol = sum(m["volume_24h"] or 0 for m in markets)
     total_liq = sum(m["liquidity"] or 0 for m in markets)
@@ -179,7 +199,7 @@ def render_overview(markets: list[dict[str, Any]]) -> None:
 # --------------------------------------------------------------------------- #
 def render_detail(markets: list[dict[str, Any]]) -> None:
     """Detalle de un mercado: grafica historica de CLOB y metricas."""
-    st.subheader("🔍 Detalle de mercado")
+    st.subheader("Detalle de mercado")
 
     tradeable = [m for m in markets if m.get("clob_token_ids")]
     if not tradeable:
@@ -224,7 +244,7 @@ def _short(addr: str) -> str:
 
 def render_whales(markets: list[dict[str, Any]]) -> None:
     """Top ballenas y, al seleccionar una, la foto actual de su cartera completa."""
-    st.subheader("🐋 Ballenas")
+    st.subheader("Ballenas")
     st.caption(
         "Foto ACTUAL (no historico). Las ballenas se rankean por VALOR EN $ "
         "(shares × precio actual) de su posicion agregada en los "
@@ -292,7 +312,7 @@ def render_whales(markets: list[dict[str, Any]]) -> None:
 
     table = pd.DataFrame({
         "Mercado": positions.get("title"),
-        "Política": positions["es_politica"].map({True: "🟢", False: ""}),
+        "Política": positions["es_politica"].map({True: "Sí", False: "—"}),
         "Apuesta": positions.get("outcome"),  # de qué lado está: Yes/No (Sí/No)
         "Tamaño": pd.to_numeric(positions.get("size"), errors="coerce"),
         "Precio medio": pd.to_numeric(positions.get("avgPrice"), errors="coerce"),
@@ -328,7 +348,13 @@ def render_whales(markets: list[dict[str, Any]]) -> None:
 # --------------------------------------------------------------------------- #
 def main() -> None:
     """Punto de entrada del dashboard."""
-    st.title("🗳️ Polymarket Politics")
+    st.markdown(
+        '<div class="app-header">'
+        '<h1>Polymarket Politics</h1>'
+        '<div class="subtitle">Monitor de mercados de política y de las mayores posiciones (ballenas)</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
     cfg = render_sidebar()
 
     try:
@@ -337,7 +363,7 @@ def main() -> None:
         st.error(f"Error cargando mercados: {exc}")
         return
 
-    tab_overview, tab_detail, tab_whales = st.tabs(["📊 Vista general", "🔍 Detalle", "🐋 Ballenas"])
+    tab_overview, tab_detail, tab_whales = st.tabs(["Mercados", "Detalle", "Ballenas"])
     with tab_overview:
         render_overview(markets)
     with tab_detail:
