@@ -12,6 +12,7 @@ from src.analysis.whales import (
     Whale,
     get_wallet_funding_source,
     group_by_funding_source,
+    politics_portfolio_share,
 )
 
 WALLET = "0xAaAa000000000000000000000000000000000001"
@@ -72,6 +73,35 @@ class TestGroupByFundingSource(unittest.TestCase):
     @patch("src.analysis.whales.get_first_token_transfers", return_value=[])
     def test_ignora_wallets_sin_funding(self, _mock_usdc, _mock_native) -> None:
         self.assertEqual(group_by_funding_source([Whale("0xw1"), Whale("0xw2")]), {})
+
+
+class TestPoliticsPortfolioShare(unittest.TestCase):
+    """Valora la parte de una cartera que esta en mercados de politica."""
+
+    POL = {"0xpolA", "0xpolB"}
+
+    def test_suma_politica_y_total(self) -> None:
+        positions = [
+            {"conditionId": "0xpolA", "currentValue": "100"},
+            {"conditionId": "0xotro", "currentValue": "300"},
+            {"conditionId": "0xpolB", "currentValue": "50"},
+        ]
+        pol, tot = politics_portfolio_share(positions, self.POL)
+        self.assertEqual(pol, 150.0)
+        self.assertEqual(tot, 450.0)
+
+    def test_cero_politica_operador(self) -> None:
+        # Wallet tipo operador: mucho valor pero nada en politica.
+        positions = [{"conditionId": "0xotro", "currentValue": "1000000"}]
+        pol, tot = politics_portfolio_share(positions, self.POL)
+        self.assertEqual(pol, 0.0)
+        self.assertEqual(tot, 1000000.0)
+
+    def test_valores_no_numericos_no_rompen(self) -> None:
+        positions = [{"conditionId": "0xpolA", "currentValue": None},
+                     {"conditionId": "0xpolA"}]
+        pol, tot = politics_portfolio_share(positions, self.POL)
+        self.assertEqual((pol, tot), (0.0, 0.0))
 
 
 if __name__ == "__main__":

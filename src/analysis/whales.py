@@ -109,6 +109,33 @@ def get_wallet_funding_source(wallet_address: str) -> tuple[str, str] | None:
     return None
 
 
+def politics_portfolio_share(
+    positions: list[dict[str, Any]],
+    politics_conditions: set[str],
+) -> tuple[float, float]:
+    """Valor en politica y valor total de una cartera (foto actual).
+
+    Suma el `currentValue` (valor en $ a precio actual) de todas las posiciones y,
+    aparte, el de las que estan en un mercado de politica (`conditionId` en
+    `politics_conditions`). Sirve para filtrar/mostrar que ballenas estan de
+    verdad en politica y cuales solo aparecen por posiciones de otras categorias.
+
+    Returns:
+        (valor_en_politica, valor_total). El share es valor_en_politica/valor_total.
+    """
+    total = 0.0
+    politics = 0.0
+    for pos in positions:
+        try:
+            value = float(pos.get("currentValue") or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        total += value
+        if pos.get("conditionId") in politics_conditions:
+            politics += value
+    return politics, total
+
+
 def group_by_funding_source(whales: list[Whale]) -> dict[str, list[str]]:
     """Agrupa wallets que comparten la misma fuente de fondos.
 

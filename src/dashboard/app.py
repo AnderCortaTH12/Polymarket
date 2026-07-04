@@ -23,7 +23,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from src.analysis.whales import Whale, rank_whales
+from src.analysis.whales import Whale, politics_portfolio_share, rank_whales
 from src.client.clob import get_price_history
 from src.client.data_api import get_user_positions
 from src.client.gamma import flatten_markets, get_politics_events
@@ -268,27 +268,52 @@ def render_whales(markets: list[dict[str, Any]]) -> None:
         st.info("No se han encontrado holders en estos mercados.")
         return
 
-    whale_df = pd.DataFrame([
-        {
-            "Wallet": _short(w.proxy_wallet),
-            "Valor en política ($)": w.total_value_usd,
-            "Nº mercados": len(w.markets),
-        }
-        for w in whales
-    ]).sort_values("Valor en política ($)", ascending=False)
+    # Excluimos las wallets cuya cartera no tiene NADA de politica (operadores /
+    # market makers cuyo valor son posiciones resueltas de otras categorias): no
+    # nos interesan. De paso guardamos el % de su cartera que es politica.
+    rows: list[dict[str, Any]] = []
+    with st.spinner("Analizando carteras (excluyendo wallets sin política)..."):
+        for w in whales:
+            df = load_user_positions(w.proxy_wallet)
+            pol, _tot = (
+                politics_portfolio_share(df.to_dict("records"), politics_conditions)
+                if not df.empty else (0.0, 0.0)
+            )
+            if pol <= 0:
+                continue  # 0% de politica -> fuera
+            rows.append({
+                "Wallet": _short(w.proxy_wallet),
+                "Valor en política ($)": w.total_value_usd,
+                "% cartera en política": pol / _tot if _tot else 0.0,
+                "Nº mercados": len(w.markets),
+                "_wallet": w.proxy_wallet,
+            })
+
+    if not rows:
+        st.info("Ninguna ballena con posiciones de política en su cartera ahora mismo.")
+        return
+
+    whale_df = pd.DataFrame(rows).sort_values("Valor en política ($)", ascending=False)
+    st.caption(f"{len(rows)} de {len(whales)} ballenas tienen posiciones de política (el resto excluidas).")
 
     st.dataframe(
-        whale_df,
+        whale_df.drop(columns="_wallet"),
         width="stretch",
         hide_index=True,
         column_config={
             "Valor en política ($)": st.column_config.NumberColumn(format="$%.0f"),
+            "% cartera en política": st.column_config.ProgressColumn(
+                "% cartera en política", min_value=0, max_value=1, format="%.0f%%"
+            ),
         },
     )
 
     # --- Detalle de la cartera de una ballena --------------------------------
     st.markdown("#### Cartera de una ballena")
-    options = {f"{_short(w.proxy_wallet)}  (${w.total_value_usd:,.0f})": w.proxy_wallet for w in whales}
+    options = {
+        f"{_short(r['_wallet'])}  (${r['Valor en política ($)']:,.0f})": r["_wallet"]
+        for r in whale_df.to_dict("records")
+    }
     label = st.selectbox("Wallet", list(options.keys()))
     wallet = options[label]
     st.caption(f"Wallet completa: `{wallet}` · top {MAX_WHALE_POSITIONS} posiciones por valor")
