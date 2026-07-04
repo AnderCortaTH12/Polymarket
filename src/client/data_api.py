@@ -53,34 +53,50 @@ def get_market_holders(condition_id: str, limit: int = DEFAULT_LIMIT) -> list[di
 PAGE_SIZE: int = 500  # maximo por pagina del endpoint de positions
 
 
-def get_user_positions(proxy_wallet: str, max_positions: int | None = None) -> list[dict[str, Any]]:
-    """Cartera COMPLETA (posiciones abiertas) de una wallet proxy, paginando.
+def get_user_positions(
+    proxy_wallet: str,
+    max_positions: int | None = None,
+    sort_by: str = "CURRENT",
+    sort_direction: str = "DESC",
+) -> list[dict[str, Any]]:
+    """Posiciones abiertas de una wallet proxy, ordenadas en servidor y paginando.
 
-    El endpoint devuelve como mucho `PAGE_SIZE` posiciones por llamada, asi que
-    hay que recorrer paginas con `offset` hasta agotarlas; si no, se pierde la
-    cola de la cartera y el total (usado para el % de cada posicion) queda mal.
+    Ordena por defecto por valor actual descendente (`sortBy=CURRENT`), de modo
+    que con un `max_positions` acotado se traen las posiciones que concentran
+    casi todo el valor de la cartera en UNA sola llamada (rapido). Las ballenas
+    grandes pueden tener miles de posiciones; paginarlas todas es lentisimo y no
+    aporta, porque la cola son posiciones minusculas.
 
-    Cada posicion incluye tamaño, precio medio, valor actual y PnL.
+    Con `max_positions=None` se recorre la cartera completa (usar solo offline,
+    p.ej. para el ranking, no en el dashboard interactivo).
 
     Args:
         proxy_wallet: wallet a consultar.
-        max_positions: tope opcional de posiciones a traer (None = todas).
+        max_positions: tope de posiciones a traer (None = todas).
+        sort_by: campo de orden del servidor (CURRENT = valor actual).
+        sort_direction: ASC o DESC.
     """
     positions: list[dict[str, Any]] = []
     offset = 0
     while True:
-        params = {"user": proxy_wallet, "limit": PAGE_SIZE, "offset": offset}
+        remaining = None if max_positions is None else max_positions - len(positions)
+        page_limit = PAGE_SIZE if remaining is None else min(PAGE_SIZE, remaining)
+        params = {
+            "user": proxy_wallet,
+            "limit": page_limit,
+            "offset": offset,
+            "sortBy": sort_by,
+            "sortDirection": sort_direction,
+        }
         page = get_json(POSITIONS_ENDPOINT, params=params)
         page = page if isinstance(page, list) else []
         positions.extend(page)
-        if len(page) < PAGE_SIZE:
+        if len(page) < page_limit:
             break
         if max_positions is not None and len(positions) >= max_positions:
             break
-        offset += PAGE_SIZE
-    if max_positions is not None:
-        positions = positions[:max_positions]
-    logger.info("positions user=%s -> %d posiciones (paginado)", proxy_wallet, len(positions))
+        offset += page_limit
+    logger.info("positions user=%s -> %d posiciones (tope %s)", proxy_wallet, len(positions), max_positions)
     return positions
 
 

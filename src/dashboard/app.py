@@ -33,6 +33,10 @@ from src.collector.models import DB_PATH
 # mantiene el numero de llamadas a la Data API razonable.
 WHALE_MARKETS_SAMPLE: int = 60
 WHALE_TOP_N: int = 50
+# Tope de posiciones a traer por ballena. Las grandes tienen miles; el endpoint
+# las ordena por valor descendente, asi que el top concentra casi todo el valor
+# y se carga en una sola llamada (evita esperas de minutos).
+MAX_WHALE_POSITIONS: int = 300
 
 logger = logging.getLogger(__name__)
 
@@ -91,12 +95,14 @@ def load_whales(top_n: int = WHALE_TOP_N) -> list[Whale]:
 
 @st.cache_data(ttl=300)
 def load_user_positions(wallet: str) -> pd.DataFrame:
-    """Cartera COMPLETA (todos los mercados) de una wallet como DataFrame. Cacheado 5 min.
+    """Top posiciones (por valor) de una wallet como DataFrame. Cacheado 5 min.
 
-    La cartera completa (no solo politica) permite calcular el % real de cada
-    posicion sobre el total. Pagina para no perder la cola de la cartera.
+    Trae como mucho `MAX_WHALE_POSITIONS`, ordenadas por valor actual desc en el
+    servidor: una sola llamada rapida. Suficiente para el % de cartera porque la
+    cola (miles de posiciones minusculas de las ballenas grandes) no mueve el
+    total y solo hacia la carga insoportablemente lenta.
     """
-    positions = get_user_positions(wallet)
+    positions = get_user_positions(wallet, max_positions=MAX_WHALE_POSITIONS)
     if not positions:
         return pd.DataFrame()
     return pd.DataFrame(positions)
@@ -285,10 +291,17 @@ def render_whales(markets: list[dict[str, Any]]) -> None:
     options = {f"{_short(w.proxy_wallet)}  (${w.total_value_usd:,.0f})": w.proxy_wallet for w in whales}
     label = st.selectbox("Wallet", list(options.keys()))
     wallet = options[label]
-    st.caption(f"Wallet completa: `{wallet}`")
+    st.caption(f"Wallet completa: `{wallet}` · top {MAX_WHALE_POSITIONS} posiciones por valor")
 
-    with st.spinner("Cargando cartera..."):
-        positions = load_user_positions(wallet)
+    # Persistimos la cartera cargada en session_state: asi un rerun (p.ej. el
+    # auto-refresco al entrar datos nuevos) la re-dibuja al instante en vez de
+    # volver a cargarla y cancelar la carga a medias. Solo se carga cuando
+    # cambia la wallet seleccionada.
+    if st.session_state.get("whale_wallet") != wallet or "whale_positions" not in st.session_state:
+        with st.spinner("Cargando cartera..."):
+            st.session_state["whale_wallet"] = wallet
+            st.session_state["whale_positions"] = load_user_positions(wallet)
+    positions = st.session_state["whale_positions"]
     if positions.empty:
         st.warning("Esta wallet no tiene posiciones abiertas ahora mismo.")
         return
@@ -306,8 +319,9 @@ def render_whales(markets: list[dict[str, Any]]) -> None:
     pct_politics = politics_value / total_value if total_value else 0.0
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Valor cartera", f"${total_value:,.0f}")
-    c2.metric("Posiciones", len(positions))
+    c1.metric("Valor (top posiciones)", f"${total_value:,.0f}",
+              help=f"Suma de las {len(positions)} mayores posiciones por valor")
+    c2.metric("Posiciones cargadas", len(positions))
     c3.metric("% en politica", f"{pct_politics:.0%}", help="Nuestro foco de analisis")
 
     table = pd.DataFrame({
