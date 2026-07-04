@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT: int = 15
 MAX_RETRIES: int = 3
 BACKOFF_BASE: float = 1.5  # segundos; espera = BACKOFF_BASE ** intento
+# Algunos endpoints (Data API) rechazan con 403 peticiones sin User-Agent.
+DEFAULT_HEADERS: dict[str, str] = {
+    "User-Agent": "polymarket-politics-dashboard/0.1",
+    "Accept": "application/json",
+}
 
 
 def get_json(
@@ -25,6 +30,7 @@ def get_json(
     *,
     timeout: int = DEFAULT_TIMEOUT,
     max_retries: int = MAX_RETRIES,
+    headers: dict[str, str] | None = None,
 ) -> Any:
     """Hace un GET y devuelve el JSON, reintentando con backoff exponencial.
 
@@ -32,10 +38,11 @@ def get_json(
     servidor). Otros errores HTTP (4xx) se propagan de inmediato porque
     reintentarlos no cambiaría el resultado.
     """
+    merged_headers = {**DEFAULT_HEADERS, **(headers or {})}
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
-            resp = requests.get(url, params=params, timeout=timeout)
+            resp = requests.get(url, params=params, timeout=timeout, headers=merged_headers)
             if resp.status_code == 429 or resp.status_code >= 500:
                 raise requests.HTTPError(
                     f"HTTP {resp.status_code} en {url}", response=resp
