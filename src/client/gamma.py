@@ -79,18 +79,39 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
-def flatten_markets(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _is_truthy(value: Any) -> bool:
+    """Interpreta un flag de Gamma que puede venir como bool o string ('true')."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() == "true"
+
+
+def flatten_markets(
+    events: list[dict[str, Any]],
+    only_tradeable: bool = True,
+) -> list[dict[str, Any]]:
     """Aplana los eventos a una fila por mercado.
 
     Cada evento contiene N mercados. Parsea los campos que vienen como strings
     JSON (`outcomes`, `outcomePrices`, `clobTokenIds`) y extrae los campos
     útiles para el resto del sistema.
+
+    Aunque `get_politics_events` filtra por `active`/`closed` a nivel de EVENTO,
+    un evento activo puede contener sub-mercados ya cerrados o inactivos (p.ej.
+    candidatos descartados de un multi-outcome). Con `only_tradeable=True` (por
+    defecto) se descartan esos: solo se quedan los mercados con `active=true` y
+    `closed=false`. Es lo que quiere el resto del sistema (collector, ranking de
+    ballenas, dashboard); pásalo a False para obtener todos.
     """
     rows: list[dict[str, Any]] = []
     for event in events:
         event_slug = event.get("slug")
         event_title = event.get("title")
         for market in event.get("markets", []):
+            if only_tradeable and not (
+                _is_truthy(market.get("active")) and not _is_truthy(market.get("closed"))
+            ):
+                continue
             outcomes = _parse_json_field(market.get("outcomes")) or []
             prices_raw = _parse_json_field(market.get("outcomePrices")) or []
             outcome_prices = [_to_float(p) for p in prices_raw]

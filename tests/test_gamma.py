@@ -21,6 +21,8 @@ class TestFlattenMarkets(unittest.TestCase):
                     "id": "0xMARKET",
                     "conditionId": "0xCOND",
                     "question": "¿Ganará el candidato A?",
+                    "active": True,
+                    "closed": False,
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.62", "0.38"]',
                     "clobTokenIds": '["111", "222"]',
@@ -58,10 +60,32 @@ class TestFlattenMarkets(unittest.TestCase):
         self.assertEqual(row["url"], "https://polymarket.com/event/elecciones-2028")
 
     def test_valores_ausentes_no_rompen(self) -> None:
-        row = flatten_markets([{"slug": "x", "markets": [{"id": "1"}]}])[0]
+        # only_tradeable=False para no filtrar el mercado de prueba (sin flags).
+        row = flatten_markets([{"slug": "x", "markets": [{"id": "1"}]}], only_tradeable=False)[0]
         self.assertEqual(row["outcomes"], [])
         self.assertEqual(row["outcome_prices"], [])
         self.assertIsNone(row["volume_24h"])
+
+
+class TestOnlyTradeableFilter(unittest.TestCase):
+    """El filtro por defecto descarta sub-mercados cerrados o inactivos."""
+
+    def _event_con(self, active, closed) -> dict:
+        return {"slug": "e", "markets": [{"id": "m", "active": active, "closed": closed}]}
+
+    def test_descarta_cerrados_e_inactivos(self) -> None:
+        self.assertEqual(flatten_markets([self._event_con(True, True)]), [])   # cerrado
+        self.assertEqual(flatten_markets([self._event_con(False, False)]), [])  # inactivo
+        self.assertEqual(len(flatten_markets([self._event_con(True, False)])), 1)  # tradeable
+
+    def test_acepta_flags_como_string(self) -> None:
+        # Gamma puede devolver los flags como strings 'true'/'false'.
+        self.assertEqual(len(flatten_markets([self._event_con("true", "false")])), 1)
+        self.assertEqual(flatten_markets([self._event_con("true", "true")]), [])
+
+    def test_only_tradeable_false_no_filtra(self) -> None:
+        rows = flatten_markets([self._event_con(True, True)], only_tradeable=False)
+        self.assertEqual(len(rows), 1)
 
 
 if __name__ == "__main__":
