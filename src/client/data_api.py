@@ -50,15 +50,37 @@ def get_market_holders(condition_id: str, limit: int = DEFAULT_LIMIT) -> list[di
     return groups
 
 
-def get_user_positions(proxy_wallet: str, limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
-    """Cartera completa (posiciones abiertas) de una wallet proxy.
+PAGE_SIZE: int = 500  # maximo por pagina del endpoint de positions
+
+
+def get_user_positions(proxy_wallet: str, max_positions: int | None = None) -> list[dict[str, Any]]:
+    """Cartera COMPLETA (posiciones abiertas) de una wallet proxy, paginando.
+
+    El endpoint devuelve como mucho `PAGE_SIZE` posiciones por llamada, asi que
+    hay que recorrer paginas con `offset` hasta agotarlas; si no, se pierde la
+    cola de la cartera y el total (usado para el % de cada posicion) queda mal.
 
     Cada posicion incluye tamaño, precio medio, valor actual y PnL.
+
+    Args:
+        proxy_wallet: wallet a consultar.
+        max_positions: tope opcional de posiciones a traer (None = todas).
     """
-    params = {"user": proxy_wallet, "limit": limit}
-    positions = get_json(POSITIONS_ENDPOINT, params=params)
-    positions = positions if isinstance(positions, list) else []
-    logger.info("positions user=%s -> %d posiciones", proxy_wallet, len(positions))
+    positions: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        params = {"user": proxy_wallet, "limit": PAGE_SIZE, "offset": offset}
+        page = get_json(POSITIONS_ENDPOINT, params=params)
+        page = page if isinstance(page, list) else []
+        positions.extend(page)
+        if len(page) < PAGE_SIZE:
+            break
+        if max_positions is not None and len(positions) >= max_positions:
+            break
+        offset += PAGE_SIZE
+    if max_positions is not None:
+        positions = positions[:max_positions]
+    logger.info("positions user=%s -> %d posiciones (paginado)", proxy_wallet, len(positions))
     return positions
 
 
@@ -91,7 +113,7 @@ def _main() -> None:
 
     if trades:
         wallet = trades[0]["proxyWallet"]
-        positions = get_user_positions(wallet, limit=3)
+        positions = get_user_positions(wallet, max_positions=3)
         print(f"\nPosiciones de {wallet}:")
         for p in positions:
             print(f"  {p.get('title', '')[:40]:<40}  size={p.get('size')}  PnL={p.get('cashPnl')}")

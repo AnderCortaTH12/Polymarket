@@ -31,7 +31,7 @@ from src.collector.models import DB_PATH
 
 # Cuantos mercados (por volumen) se agregan para rankear ballenas. Limitar
 # mantiene el numero de llamadas a la Data API razonable.
-WHALE_MARKETS_SAMPLE: int = 12
+WHALE_MARKETS_SAMPLE: int = 60
 WHALE_TOP_N: int = 50
 
 logger = logging.getLogger(__name__)
@@ -60,12 +60,13 @@ def load_price_history(token_id: str, interval: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300)
-def load_whales(condition_ids: tuple[str, ...], top_n: int = WHALE_TOP_N) -> list[Whale]:
-    """Rankea las top ballenas por exposicion en los mercados dados. Cacheado 5 min.
+def load_whales(top_n: int = WHALE_TOP_N) -> list[Whale]:
+    """Rankea las top ballenas por VALOR EN $ sobre los mercados de politica.
 
-    Recibe una tupla (hashable) de condition_ids para que Streamlit pueda cachear.
+    Cacheado 5 min. Usa `load_markets()` (ya cacheado) para tener los precios
+    actuales con los que valorar las posiciones.
     """
-    return rank_whales(list(condition_ids), top_n=top_n)
+    return rank_whales(load_markets(), top_n=top_n, max_markets=WHALE_MARKETS_SAMPLE)
 
 
 @st.cache_data(ttl=300)
@@ -73,9 +74,9 @@ def load_user_positions(wallet: str) -> pd.DataFrame:
     """Cartera COMPLETA (todos los mercados) de una wallet como DataFrame. Cacheado 5 min.
 
     La cartera completa (no solo politica) permite calcular el % real de cada
-    posicion sobre el total.
+    posicion sobre el total. Pagina para no perder la cola de la cartera.
     """
-    positions = get_user_positions(wallet, limit=500)
+    positions = get_user_positions(wallet)
     if not positions:
         return pd.DataFrame()
     return pd.DataFrame(positions)
@@ -225,22 +226,18 @@ def render_whales(markets: list[dict[str, Any]]) -> None:
     """Top ballenas y, al seleccionar una, la foto actual de su cartera completa."""
     st.subheader("🐋 Ballenas")
     st.caption(
-        "Foto ACTUAL (no historico). Las ballenas se rankean por su exposicion "
-        f"agregada en los {WHALE_MARKETS_SAMPLE} mercados de politica de mayor volumen."
+        "Foto ACTUAL (no historico). Las ballenas se rankean por VALOR EN $ "
+        "(shares × precio actual) de su posicion agregada en los "
+        f"{WHALE_MARKETS_SAMPLE} mercados de politica de mayor volumen."
     )
 
-    # condition_ids de los mercados de politica con mas volumen (para agregar holders).
-    con_markets = [m for m in markets if m.get("condition_id")]
-    con_markets.sort(key=lambda m: m["volume_24h"] or 0, reverse=True)
-    condition_ids = tuple(dict.fromkeys(m["condition_id"] for m in con_markets[:WHALE_MARKETS_SAMPLE]))
-    politics_conditions = {m["condition_id"] for m in con_markets}
-
-    if not condition_ids:
+    politics_conditions = {m["condition_id"] for m in markets if m.get("condition_id")}
+    if not politics_conditions:
         st.info("No hay mercados con condition_id para rankear ballenas.")
         return
 
     with st.spinner("Rankeando ballenas..."):
-        whales = load_whales(condition_ids)
+        whales = load_whales()
     if not whales:
         st.info("No se han encontrado holders en estos mercados.")
         return
@@ -248,25 +245,24 @@ def render_whales(markets: list[dict[str, Any]]) -> None:
     whale_df = pd.DataFrame([
         {
             "Wallet": _short(w.proxy_wallet),
-            "Exposicion (politica)": w.total_amount,
+            "Valor en política ($)": w.total_value_usd,
             "Nº mercados": len(w.markets),
-            "_wallet": w.proxy_wallet,
         }
         for w in whales
-    ]).sort_values("Exposicion (politica)", ascending=False)
+    ]).sort_values("Valor en política ($)", ascending=False)
 
     st.dataframe(
-        whale_df.drop(columns="_wallet"),
+        whale_df,
         width="stretch",
         hide_index=True,
         column_config={
-            "Exposicion (politica)": st.column_config.NumberColumn(format="%.0f"),
+            "Valor en política ($)": st.column_config.NumberColumn(format="$%.0f"),
         },
     )
 
     # --- Detalle de la cartera de una ballena --------------------------------
     st.markdown("#### Cartera de una ballena")
-    options = {f"{_short(w.proxy_wallet)}  ({w.total_amount:,.0f})": w.proxy_wallet for w in whales}
+    options = {f"{_short(w.proxy_wallet)}  (${w.total_value_usd:,.0f})": w.proxy_wallet for w in whales}
     label = st.selectbox("Wallet", list(options.keys()))
     wallet = options[label]
     st.caption(f"Wallet completa: `{wallet}`")
