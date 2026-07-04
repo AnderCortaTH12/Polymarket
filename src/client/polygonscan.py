@@ -19,7 +19,11 @@ from src.client.http import get_json
 logger = logging.getLogger(__name__)
 
 # No hardcodear URLs sueltas: constantes al inicio del modulo.
-POLYGONSCAN_BASE_URL: str = "https://api.polygonscan.com/api"
+# Polygonscan migro a la API V2 unificada de Etherscan: el antiguo
+# api.polygonscan.com/api esta deprecado (devuelve HTML). Se usa el endpoint
+# multichain de Etherscan con chainid=137 (Polygon).
+POLYGONSCAN_BASE_URL: str = "https://api.etherscan.io/v2/api"
+POLYGON_CHAIN_ID: int = 137
 POLYGONSCAN_API_KEY_ENV: str = "POLYGONSCAN_API_KEY"
 
 # Rate limit del plan gratuito: 5 req/segundo. Dejamos un pequeno margen.
@@ -96,6 +100,7 @@ def get_first_transactions(wallet_address: str, limit: int = 10) -> list[dict[st
     _throttle()
 
     params = {
+        "chainid": POLYGON_CHAIN_ID,
         "module": "account",
         "action": "txlist",
         "address": wallet_address,
