@@ -7,3 +7,4 @@ data/*.db
 .streamlit/secrets.toml
 .claude/
 logs/
+notas.txt
