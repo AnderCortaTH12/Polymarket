@@ -204,6 +204,32 @@ def connect(db_path: Any = DB_PATH) -> sqlite3.Connection:
     return conn
 
 
+_PROFILE_COLUMNS = (
+    "wallet, wallet_age_days, total_volume_usd, n_markets, concentration, win_rate, "
+    "n_resolved, longshot_wins, funding_cluster_id, avg_trade_size_usd, updated_at"
+)
+
+
+def load_profile(conn: sqlite3.Connection, wallet: str) -> WalletProfile | None:
+    """Lee el perfil de una wallet de SQLite (rapido, sin red). None si no existe."""
+    row = conn.execute(
+        f"SELECT {_PROFILE_COLUMNS} FROM wallet_profiles WHERE wallet = ?", (wallet,)
+    ).fetchone()
+    if row is None:
+        return None
+    return WalletProfile(*row)
+
+
+def load_shared_cluster_ids(conn: sqlite3.Connection) -> set[str]:
+    """Funders (funding_cluster_id) compartidos por mas de una wallet perfilada."""
+    rows = conn.execute(
+        "SELECT funding_cluster_id FROM wallet_profiles "
+        "WHERE funding_cluster_id IS NOT NULL "
+        "GROUP BY funding_cluster_id HAVING COUNT(*) > 1"
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
 def save_profile(conn: sqlite3.Connection, profile: WalletProfile) -> None:
     """Inserta o actualiza el perfil de una wallet."""
     d = asdict(profile)
