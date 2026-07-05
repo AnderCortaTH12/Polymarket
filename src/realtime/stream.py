@@ -32,9 +32,11 @@ from src.analysis.buckets import (
     save_buckets,
     signed_imbalance,
 )
+from src import db
 from src.analysis.profiles import load_profile, load_shared_cluster_ids
 from src.analysis.scoring import compute_score
 from src.client.gamma import flatten_markets, get_politics_events
+from src.collector.models import DB_PATH
 from src.realtime import storage
 
 logger = logging.getLogger(__name__)
@@ -132,8 +134,17 @@ class Detector:
     asyncio (`run`) solo se encarga de la conexion, PING, watchdog y refrescos.
     """
 
-    def __init__(self, conn: Any, bucket_size_usd: float = DEFAULT_BUCKET_SIZE_USD) -> None:
+    def __init__(
+        self,
+        conn: Any,
+        bucket_size_usd: float = DEFAULT_BUCKET_SIZE_USD,
+        db_path: Any = DB_PATH,
+    ) -> None:
+        # self.conn es la conexion del camino caliente (process_trade, heartbeat),
+        # usada SIEMPRE desde el hilo del event loop. db_path se usa para abrir
+        # conexiones nuevas en otros hilos (refresh_context corre en un executor).
         self.conn = conn
+        self.db_path = db_path
         self.bucket_size_usd = bucket_size_usd
         self.politics_conditions: set[str] = set()
         self.shared_cluster_ids: set[str] = set()
@@ -235,11 +246,21 @@ class Detector:
 
     # --- refrescos (con red, fuera del camino critico) ----------------------
     def refresh_context(self) -> None:
-        """Recarga el set de condition_ids de politica (Gamma) y los clusters (SQLite)."""
+        """Recarga el set de condition_ids de politica (Gamma) y los clusters (SQLite).
+
+        Corre en un hilo del executor (via asyncio.to_thread), por lo que NO usa
+        self.conn (creada en el hilo del event loop; SQLite prohibe compartir una
+        conexion entre hilos). Abre su propia conexion efimera en este hilo para
+        la lectura; WAL permite que coexista con las escrituras del camino caliente.
+        """
         try:
             markets = flatten_markets(get_politics_events())
             self.politics_conditions = {m["condition_id"] for m in markets if m.get("condition_id")}
-            self.shared_cluster_ids = load_shared_cluster_ids(self.conn)
+            conn = db.connect(self.db_path)
+            try:
+                self.shared_cluster_ids = load_shared_cluster_ids(conn)
+            finally:
+                conn.close()
             logger.info(
                 "Contexto refrescado: %d mercados de politica, %d clusters compartidos",
                 len(self.politics_conditions), len(self.shared_cluster_ids),

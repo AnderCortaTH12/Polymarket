@@ -5,10 +5,15 @@ el filtro de politica, el fallback name/pseudonym, el valor en $ = size*price y
 el flujo por-trade con SQLite en memoria.
 """
 import json
+import os
+import tempfile
+import threading
 import unittest
+from unittest.mock import patch
 
 from src.realtime.stream import Detector, display_name, is_politics_trade
 from src.realtime import storage
+from src.analysis import profiles
 from src.analysis.profiles import WALLET_PROFILES_SCHEMA
 from src.analysis.buckets import VOLUME_BUCKETS_SCHEMA
 
@@ -100,6 +105,34 @@ class TestProcessTrade(unittest.TestCase):
         det = _mem_detector()
         det._process_raw(json.dumps([_trade(size=120000, price=0.10), _trade(conditionId="x")]))
         self.assertEqual(det.trades_processed, 1)  # solo el de politica
+
+    def test_refresh_context_desde_otro_hilo(self) -> None:
+        # refresh_context corre en un hilo del executor; no debe usar self.conn
+        # (creada en este hilo). Con la conexion propia por hilo, leer los
+        # clusters desde otro hilo funciona sin ProgrammingError.
+        with tempfile.TemporaryDirectory() as d:
+            dbp = os.path.join(d, "t.db")
+            pc = profiles.connect(dbp)
+            pc.execute("INSERT INTO wallet_profiles (wallet, funding_cluster_id) VALUES ('w1','0xF')")
+            pc.execute("INSERT INTO wallet_profiles (wallet, funding_cluster_id) VALUES ('w2','0xF')")
+            pc.commit()
+            pc.close()
+
+            main_conn = storage.connect(":memory:")  # self.conn creada en ESTE hilo
+            det = Detector(main_conn, db_path=dbp)
+
+            with patch("src.realtime.stream.get_politics_events", return_value=[]), \
+                 patch("src.realtime.stream.flatten_markets",
+                       return_value=[{"condition_id": "0xC"}]):
+                t = threading.Thread(target=det.refresh_context)
+                t.start()
+                t.join()
+
+            # Si se hubiera usado self.conn (otro hilo) => ProgrammingError, capturada
+            # dentro de refresh_context, y shared_cluster_ids quedaria vacio.
+            self.assertEqual(det.politics_conditions, {"0xC"})
+            self.assertEqual(det.shared_cluster_ids, {"0xF"})
+            main_conn.close()
 
     def test_process_raw_desenvuelve_sobre_real(self) -> None:
         # El feed real envuelve el trade en {topic, type, payload, ...}
