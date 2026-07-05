@@ -30,9 +30,29 @@ CREATE TABLE IF NOT EXISTS alerts (
     score_breakdown     TEXT,            -- JSON {componente: puntos}
     bucket_imbalance    REAL,
     username            TEXT,            -- name/pseudonym del trader (Polymarket)
-    transaction_hash    TEXT             -- referencia auditable on-chain
+    transaction_hash    TEXT,            -- referencia auditable on-chain
+    market_slug         TEXT,            -- para el link a polymarket.com
+    trade_side          TEXT             -- BUY / SELL (el 'side' es el outcome)
 );
 """
+
+# Columnas añadidas despues de la creacion original de la tabla; se migran con
+# ALTER para BDs que ya existian sin ellas.
+_ALERTS_EXTRA_COLUMNS: dict[str, str] = {
+    "username": "TEXT",
+    "transaction_hash": "TEXT",
+    "market_slug": "TEXT",
+    "trade_side": "TEXT",
+}
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Añade columnas nuevas a `alerts` si la tabla se creo con un esquema viejo."""
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}
+    for col, decl in _ALERTS_EXTRA_COLUMNS.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} {decl}")
+    conn.commit()
 
 
 SERVICE_HEALTH_SCHEMA: str = """
@@ -50,6 +70,7 @@ def connect(db_path: Any = DB_PATH) -> sqlite3.Connection:
     conn.executescript(ALERTS_SCHEMA)
     conn.executescript(SERVICE_HEALTH_SCHEMA)
     conn.commit()
+    _ensure_columns(conn)
     return conn
 
 
@@ -75,24 +96,26 @@ def save_alert(
     bucket_imbalance: float | None = None,
     username: str | None = None,
     transaction_hash: str | None = None,
+    market_slug: str | None = None,
+    trade_side: str | None = None,
 ) -> int:
     """Inserta una alerta con el score desglosado en JSON. Devuelve su id.
 
     `score` es el `ScoreBreakdown` de `compute_score`; se guarda el total en
     `score_total` y los componentes en `score_breakdown` (JSON) para poder
-    ajustar pesos despues sin perder informacion. `username` y `transaction_hash`
-    quedan como referencia legible y auditable.
+    ajustar pesos despues sin perder informacion. `username`, `transaction_hash`,
+    `market_slug` y `trade_side` quedan como referencia legible y auditable.
     """
     cur = conn.execute(
         "INSERT INTO alerts (ts, condition_id, market_question, wallet, side, "
         "trade_size_usd, price_at_detection, score_total, score_breakdown, bucket_imbalance, "
-        "username, transaction_hash) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "username, transaction_hash, market_slug, trade_side) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             ts, condition_id, market_question, wallet, side,
             trade_size_usd, price_at_detection, score.score_total,
             json.dumps(score.components()), bucket_imbalance,
-            username, transaction_hash,
+            username, transaction_hash, market_slug, trade_side,
         ),
     )
     conn.commit()

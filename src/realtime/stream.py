@@ -223,6 +223,8 @@ class Detector:
             bucket_imbalance=imbalance,
             username=display_name(trade),
             transaction_hash=trade.get("transactionHash"),
+            market_slug=trade.get("slug"),
+            trade_side=trade.get("side"),
         )
         logger.info(
             "ALERTA score=%d %s por %s (%s) $%.0f tx=%s",

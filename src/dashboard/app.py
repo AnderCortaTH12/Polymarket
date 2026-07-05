@@ -6,6 +6,7 @@ collector). Los datos del API se cachean con TTL para no repetir llamadas.
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import sys
@@ -28,6 +29,7 @@ from src.client.clob import get_price_history
 from src.client.data_api import get_user_positions
 from src.client.gamma import flatten_markets, get_politics_events
 from src.collector.models import DB_PATH
+from src.realtime import storage
 
 # Cuantos mercados (por volumen) se agregan para rankear ballenas. Limitar
 # mantiene el numero de llamadas a la Data API razonable.
@@ -37,6 +39,11 @@ WHALE_TOP_N: int = 50
 # las ordena por valor descendente, asi que el top concentra casi todo el valor
 # y se carga en una sola llamada (evita esperas de minutos).
 MAX_WHALE_POSITIONS: int = 300
+# Alertas del detector (Fase 6).
+ALERTS_LIMIT: int = 100
+DETECTOR_DOWN_MINUTES: float = 4.0  # sin heartbeat mas reciente => detector caido
+POLYMARKET_EVENT_URL: str = "https://polymarket.com/event"
+POLYGONSCAN_TX_URL: str = "https://polygonscan.com/tx"
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +113,44 @@ def load_user_positions(wallet: str) -> pd.DataFrame:
     if not positions:
         return pd.DataFrame()
     return pd.DataFrame(positions)
+
+
+@st.cache_data(ttl=30)
+def load_alerts(min_score: int, limit: int) -> pd.DataFrame:
+    """Ultimas alertas del detector (Fase 6) como DataFrame. Cacheado 30s.
+
+    `storage.connect` garantiza que la tabla existe (aunque el detector no haya
+    corrido nunca), asi que una BD sin alertas devuelve un DataFrame vacio.
+    """
+    conn = storage.connect(DB_PATH)
+    try:
+        df = pd.read_sql_query(
+            "SELECT id, ts, market_question, market_slug, condition_id, wallet, username, "
+            "side, trade_side, trade_size_usd, price_at_detection, score_total, "
+            "score_breakdown, transaction_hash FROM alerts "
+            "WHERE score_total >= ? ORDER BY ts DESC LIMIT ?",
+            conn, params=(min_score, limit),
+        )
+    finally:
+        conn.close()
+    return df
+
+
+def detector_status() -> dict[str, Any]:
+    """Ultimo heartbeat del detector desde service_health (ts, trades, vivo)."""
+    conn = storage.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT ts, trades_processed, ws_connected FROM service_health "
+            "ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {"seen": False}
+    ts, trades, ws = row
+    age_min = (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds() / 60.0
+    return {"seen": True, "ts": ts, "trades_processed": trades, "ws_connected": bool(ws), "age_min": age_min}
 
 
 def collector_status() -> dict[str, Any]:
@@ -383,6 +428,116 @@ def render_whales(markets: list[dict[str, Any]]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Seccion 5 — alertas del detector (Fase 6)
+# --------------------------------------------------------------------------- #
+def _render_detector_status() -> None:
+    """Estado del detector: ultimo heartbeat, antiguedad y aviso si parece caido."""
+    status = detector_status()
+    if not status["seen"]:
+        st.info("El detector no ha escrito ningun heartbeat todavia. "
+                "Arrancalo con: python -m src.realtime.stream")
+        return
+
+    age = status["age_min"]
+    c1, c2, c3 = st.columns(3)
+    estado = "activo" if age <= DETECTOR_DOWN_MINUTES and status["ws_connected"] else "sin señal"
+    c1.metric("Detector", estado)
+    c2.metric("Último heartbeat", f"hace {age:.0f} min")
+    c3.metric("Trades procesados", f"{status['trades_processed']:,}")
+    if age > DETECTOR_DOWN_MINUTES:
+        st.warning(
+            f"El último heartbeat es de hace {age:.0f} min (> {DETECTOR_DOWN_MINUTES:.0f}). "
+            "El detector parece caído: revisa el proceso o logs/detector.log."
+        )
+
+
+def _render_breakdown(row: dict[str, Any]) -> None:
+    """Muestra el score_breakdown (JSON) de una alerta, componente por componente."""
+    st.markdown(f"**Desglose del score — total {int(row.get('score_total') or 0)}**")
+    try:
+        breakdown = json.loads(row.get("score_breakdown") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        st.caption("No se pudo leer el desglose.")
+        return
+
+    silenciado = bool(breakdown.pop("flujo_toxico_silenciado", False))
+    comp = pd.DataFrame(
+        [{"Componente": k, "Puntos": v} for k, v in breakdown.items()]
+    ).sort_values("Puntos", ascending=False)
+    st.dataframe(comp, width="stretch", hide_index=True)
+    if silenciado:
+        st.caption("Nota: flujo tóxico silenciado (imbalance fuerte pero volumen de cubo insuficiente).")
+
+    links = []
+    if row.get("market_slug"):
+        links.append(f"[Ver mercado en Polymarket]({POLYMARKET_EVENT_URL}/{row['market_slug']})")
+    if row.get("transaction_hash"):
+        links.append(f"[Transacción en Polygonscan]({POLYGONSCAN_TX_URL}/{row['transaction_hash']})")
+    if links:
+        st.markdown(" · ".join(links))
+
+
+def render_alerts() -> None:
+    """Pestaña de alertas del detector: estado, filtros y tabla con desglose."""
+    st.subheader("Alertas")
+    st.caption(
+        "Anomalías compatibles con trading informado (no una acusación). "
+        "El score y su desglose permiten calibrar con el backtest."
+    )
+
+    _render_detector_status()
+    st.divider()
+
+    c1, c2 = st.columns([1, 2])
+    min_score = c1.slider("Score mínimo", 0, 100, 0, step=5)
+    query = c2.text_input("Buscar mercado (título)", "")
+
+    alerts = load_alerts(min_score, ALERTS_LIMIT)
+    if not alerts.empty and query:
+        alerts = alerts[alerts["market_question"].fillna("").str.contains(query, case=False)]
+
+    if alerts.empty:
+        st.info("No hay alertas que mostrar todavía (con estos filtros).")
+        return
+
+    def _lado(r: pd.Series) -> str:
+        outcome = r.get("side") or ""
+        ts = r.get("trade_side") or ""
+        return f"{outcome} ({ts})" if ts else str(outcome)
+
+    view = pd.DataFrame({
+        "Fecha": pd.to_datetime(alerts["ts"], errors="coerce"),
+        "Mercado": alerts["market_question"],
+        "Wallet": alerts["wallet"].map(_short),
+        "Usuario": alerts["username"],
+        "Lado": alerts.apply(_lado, axis=1),
+        "Tamaño ($)": pd.to_numeric(alerts["trade_size_usd"], errors="coerce"),
+        "Score": pd.to_numeric(alerts["score_total"], errors="coerce"),
+    })
+
+    event = st.dataframe(
+        view,
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={
+            "Fecha": st.column_config.DatetimeColumn(format="YYYY-MM-DD HH:mm"),
+            "Tamaño ($)": st.column_config.NumberColumn(format="$%.0f"),
+            "Score": st.column_config.NumberColumn(format="%d"),
+        },
+    )
+
+    selected = event.selection.rows if hasattr(event, "selection") else []
+    if selected:
+        row = alerts.iloc[selected[0]].to_dict()
+        st.divider()
+        _render_breakdown(row)
+    else:
+        st.caption("Selecciona una fila para ver el desglose del score.")
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 def main() -> None:
@@ -402,13 +557,17 @@ def main() -> None:
         st.error(f"Error cargando mercados: {exc}")
         return
 
-    tab_overview, tab_detail, tab_whales = st.tabs(["Mercados", "Detalle", "Ballenas"])
+    tab_overview, tab_detail, tab_whales, tab_alerts = st.tabs(
+        ["Mercados", "Detalle", "Ballenas", "Alertas"]
+    )
     with tab_overview:
         render_overview(markets)
     with tab_detail:
         render_detail(markets)
     with tab_whales:
         render_whales(markets)
+    with tab_alerts:
+        render_alerts()
 
     if cfg["auto"]:
         time.sleep(cfg["every"])
