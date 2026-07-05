@@ -31,9 +31,12 @@ class ScoreBreakdown:
     concentracion: int = 0
     flujo_toxico: int = 0
     insensibilidad_precio: int = 0
+    # Traza: True si flujo_toxico se silencio por volumen de cubo insuficiente
+    # (la direccion era fuerte pero habia muy poco dinero para fiarse).
+    flujo_toxico_silenciado: bool = False
     score_total: int = 0
 
-    def components(self) -> dict[str, int]:
+    def components(self) -> dict[str, Any]:
         """Componentes (sin el total) para guardar como JSON en la alerta."""
         d = asdict(self)
         d.pop("score_total")
@@ -116,13 +119,21 @@ def compute_score(
         b.concentracion = w["concentracion"]
 
     # --- Flujo toxico: el cubo empuja fuerte en la MISMA direccion del trade -
+    # Solo cuenta si el cubo tiene volumen suficiente; con poco dinero un
+    # imbalance de ±1 es ruido, no señal. Si la direccion era fuerte pero el
+    # volumen es bajo, se silencia y se deja traza.
     trade_sign = _trade_sign(trade)
-    if (
+    strong_and_aligned = (
         abs(bucket_imbalance) > config.TOXIC_IMBALANCE
         and trade_sign != 0
         and (bucket_imbalance > 0) == (trade_sign > 0)
-    ):
-        b.flujo_toxico = w["flujo_toxico"]
+    )
+    if strong_and_aligned:
+        bucket_volume = float(md.get("bucket_volume_usd", 0.0) or 0.0)
+        if bucket_volume >= config.MIN_BUCKET_VOLUME_FOR_TOXICITY_USD:
+            b.flujo_toxico = w["flujo_toxico"]
+        else:
+            b.flujo_toxico_silenciado = True
 
     # --- Insensibilidad al precio (acumula el mismo lado a peor precio) ------
     if md.get("same_side_streak", 0) >= config.INSENSIBILITY_MIN_STREAK and md.get("price_against", False):

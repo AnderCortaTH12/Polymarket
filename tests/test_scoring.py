@@ -89,14 +89,54 @@ class TestComputeScore(unittest.TestCase):
 
     def test_10_flujo_toxico_y_insensibilidad(self) -> None:
         prof = FakeProfile(wallet_age_days=300)
-        # compra Yes (sign +1) con cubo empujando Yes (imbalance +0.9) -> flujo toxico
-        md = {"same_side_streak": 4, "price_against": True}
+        # compra Yes (sign +1) con cubo empujando Yes (imbalance +0.9) y volumen
+        # suficiente -> flujo toxico
+        md = {"same_side_streak": 4, "price_against": True, "bucket_volume_usd": 5000}
         s = compute_score(_trade(side="BUY", outcome="Yes"), prof, 0.9, md)
         self.assertEqual(s.flujo_toxico, W["flujo_toxico"])
+        self.assertFalse(s.flujo_toxico_silenciado)
         self.assertEqual(s.insensibilidad_precio, W["insensibilidad_precio"])
         # imbalance fuerte pero en DIRECCION CONTRARIA al trade -> no cuenta
-        s2 = compute_score(_trade(side="BUY", outcome="Yes"), prof, -0.9, {})
+        s2 = compute_score(_trade(side="BUY", outcome="Yes"), prof, -0.9, {"bucket_volume_usd": 5000})
         self.assertEqual(s2.flujo_toxico, 0)
+        self.assertFalse(s2.flujo_toxico_silenciado)
+
+
+class TestFlujoToxicoVolumenMinimo(unittest.TestCase):
+    """El flujo toxico solo cuenta si el cubo tiene volumen en $ suficiente."""
+
+    PROF = FakeProfile(wallet_age_days=300)
+
+    def test_volumen_bajo_silencia(self) -> None:
+        # imbalance maximo pero cubo de solo $200 -> 0 puntos, silenciado=True
+        s = compute_score(_trade(side="BUY", outcome="Yes"), self.PROF, 1.0,
+                          {"bucket_volume_usd": 200})
+        self.assertEqual(s.flujo_toxico, 0)
+        self.assertTrue(s.flujo_toxico_silenciado)
+
+    def test_volumen_suficiente_puntua(self) -> None:
+        s = compute_score(_trade(side="BUY", outcome="Yes"), self.PROF, 1.0,
+                          {"bucket_volume_usd": 5000})
+        self.assertEqual(s.flujo_toxico, W["flujo_toxico"])
+        self.assertFalse(s.flujo_toxico_silenciado)
+
+    def test_edge_justo_en_el_umbral(self) -> None:
+        # exactamente en el minimo -> puntua (condicion es >=)
+        s = compute_score(_trade(side="BUY", outcome="Yes"), self.PROF, 1.0,
+                          {"bucket_volume_usd": config.MIN_BUCKET_VOLUME_FOR_TOXICITY_USD})
+        self.assertEqual(s.flujo_toxico, W["flujo_toxico"])
+        # justo por debajo -> silenciado
+        s2 = compute_score(_trade(side="BUY", outcome="Yes"), self.PROF, 1.0,
+                          {"bucket_volume_usd": config.MIN_BUCKET_VOLUME_FOR_TOXICITY_USD - 0.01})
+        self.assertEqual(s2.flujo_toxico, 0)
+        self.assertTrue(s2.flujo_toxico_silenciado)
+
+    def test_sin_direccion_fuerte_no_se_marca_silenciado(self) -> None:
+        # imbalance debil: no aplica el componente, no se marca silenciado
+        s = compute_score(_trade(side="BUY", outcome="Yes"), self.PROF, 0.1,
+                          {"bucket_volume_usd": 200})
+        self.assertEqual(s.flujo_toxico, 0)
+        self.assertFalse(s.flujo_toxico_silenciado)
 
     def test_combinado_suma_total(self) -> None:
         # wallet muy fresca + trade grande longshot: fresca(25+10)+tamaño(15)+longshot(20)

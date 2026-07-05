@@ -92,16 +92,17 @@ class _BucketState:
         self.volume_usd = 0.0
         self.seq = 0
 
-    def add(self, trade: dict[str, Any]) -> tuple[float, dict[str, Any] | None]:
-        """Añade un trade. Devuelve (imbalance_actual, cubo_cerrado_o_None).
+    def add(self, trade: dict[str, Any]) -> tuple[float, float, dict[str, Any] | None]:
+        """Añade un trade. Devuelve (imbalance, volumen_del_cubo, cubo_cerrado|None).
 
-        El imbalance devuelto incluye este trade (es el "cubo actual"). Si con
-        este trade el cubo alcanza el tamaño objetivo, se cierra y se devuelve su
-        dict para persistir, y el estado se reinicia para el siguiente cubo.
+        El imbalance y el volumen incluyen este trade (es el "cubo actual"). Si
+        con este trade el cubo alcanza el tamaño objetivo, se cierra y se devuelve
+        su dict para persistir, y el estado se reinicia para el siguiente cubo.
         """
         self.trades.append(trade)
         self.volume_usd += _trade_usd(trade)
         imbalance = signed_imbalance(self.trades)
+        volume_at_trade = self.volume_usd  # volumen incluido este trade (antes de reset)
 
         closed: dict[str, Any] | None = None
         if self.volume_usd >= self.bucket_size_usd:
@@ -118,7 +119,7 @@ class _BucketState:
             self.seq += 1
             self.trades = []
             self.volume_usd = 0.0
-        return imbalance, closed
+        return imbalance, volume_at_trade, closed
 
 
 # --------------------------------------------------------------------------- #
@@ -185,7 +186,7 @@ class Detector:
 
         # 4. Cubo de volumen del mercado (crear si no existe)
         bucket = self._buckets.setdefault(cid, _BucketState(self.bucket_size_usd))
-        imbalance, closed = bucket.add(trade)
+        imbalance, bucket_volume, closed = bucket.add(trade)
         if closed is not None:
             save_buckets(self.conn, cid, [closed])
 
@@ -195,6 +196,7 @@ class Detector:
             "shared_cluster_ids": self.shared_cluster_ids,
             "same_side_streak": streak,
             "price_against": price_against,
+            "bucket_volume_usd": bucket_volume,
         }
 
         # 5. Score (con valor en $ real = size * price dentro de compute_score)

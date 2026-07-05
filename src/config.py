@@ -32,6 +32,10 @@ MIN_RESOLVED_FOR_WINRATE: int = 10
 CONCENTRATION_MIN: float = 0.7
 CONCENTRATION_MIN_VOLUME_USD: float = 20_000.0
 TOXIC_IMBALANCE: float = 0.75
+# Volumen minimo acumulado en el cubo para fiarse de su imbalance: con poco
+# dinero (ej. un solo trade de $50) un imbalance de ±1 es ruido estadistico, no
+# señal. En $ para ser consistente con que los cubos se definen por volumen en $.
+MIN_BUCKET_VOLUME_FOR_TOXICITY_USD: float = 1_500.0
 INSENSIBILITY_MIN_STREAK: int = 3
 
 # Score minimo para generar una alerta.
