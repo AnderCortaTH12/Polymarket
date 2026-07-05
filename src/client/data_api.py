@@ -36,6 +36,38 @@ def get_market_trades(condition_id: str, limit: int = DEFAULT_LIMIT) -> list[dic
     return trades
 
 
+TRADES_PAGE_SIZE: int = 500  # maximo por pagina del endpoint de trades
+
+
+def get_user_trades(proxy_wallet: str, max_trades: int | None = None) -> list[dict[str, Any]]:
+    """Historial de trades de una wallet, paginando con offset (mas reciente primero).
+
+    Cada trade trae side, size (shares), price, timestamp, outcome y conditionId,
+    con lo que se calcula volumen en $, mercados operados, tamaños y edad.
+
+    Args:
+        proxy_wallet: wallet a consultar.
+        max_trades: tope de trades a traer (None = todos). Util para acotar
+            wallets muy activas.
+    """
+    trades: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        remaining = None if max_trades is None else max_trades - len(trades)
+        page_limit = TRADES_PAGE_SIZE if remaining is None else min(TRADES_PAGE_SIZE, remaining)
+        params = {"user": proxy_wallet, "limit": page_limit, "offset": offset}
+        page = get_json(TRADES_ENDPOINT, params=params)
+        page = page if isinstance(page, list) else []
+        trades.extend(page)
+        if len(page) < page_limit:
+            break
+        if max_trades is not None and len(trades) >= max_trades:
+            break
+        offset += page_limit
+    logger.info("trades user=%s -> %d trades (tope %s)", proxy_wallet, len(trades), max_trades)
+    return trades
+
+
 def get_market_holders(condition_id: str, limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
     """Mayores posiciones abiertas de un mercado, agrupadas por token (outcome).
 
