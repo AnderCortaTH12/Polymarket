@@ -24,6 +24,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from src import db
 from src.analysis.whales import Whale, politics_portfolio_share, rank_whales
 from src.client.clob import get_price_history
 from src.client.data_api import get_user_positions
@@ -157,7 +158,7 @@ def collector_status() -> dict[str, Any]:
     """Estado de la BD del collector: existe, nº de snapshots y antiguedad del ultimo."""
     if not DB_PATH.exists():
         return {"exists": False}
-    conn = sqlite3.connect(DB_PATH)
+    conn = db.connect(DB_PATH)
     try:
         n = conn.execute("SELECT COUNT(DISTINCT ts) FROM snapshots").fetchone()[0]
         last = conn.execute("SELECT MAX(ts) FROM snapshots").fetchone()[0]

@@ -134,12 +134,11 @@ def get_user_positions(
 
 def _main() -> None:
     """Demo: toma el mercado de mayor volumen del collector y sondea los 3 endpoints."""
-    import sqlite3
-
+    from src import db
     from src.collector.models import DB_PATH
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    conn = sqlite3.connect(DB_PATH)
+    conn = db.connect(DB_PATH)
     cid, question = conn.execute(
         "SELECT condition_id, question FROM snapshots "
         "WHERE condition_id IS NOT NULL ORDER BY volume_24h DESC LIMIT 1"

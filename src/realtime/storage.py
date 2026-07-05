@@ -11,6 +11,7 @@ import logging
 import sqlite3
 from typing import Any
 
+from src import db
 from src.analysis.scoring import ScoreBreakdown
 from src.collector.models import DB_PATH
 
@@ -66,7 +67,7 @@ CREATE TABLE IF NOT EXISTS service_health (
 
 def connect(db_path: Any = DB_PATH) -> sqlite3.Connection:
     """Abre el SQLite del proyecto y garantiza las tablas alerts y service_health."""
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     conn.executescript(ALERTS_SCHEMA)
     conn.executescript(SERVICE_HEALTH_SCHEMA)
     conn.commit()

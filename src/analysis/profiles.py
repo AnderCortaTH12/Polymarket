@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from src import db
 from src.client.data_api import get_user_positions, get_user_trades
 from src.client.polygonscan import get_first_token_transfers, get_first_transactions
 from src.collector.models import DB_PATH
@@ -198,7 +199,7 @@ def build_profile(wallet: str, max_trades: int | None = 2000) -> WalletProfile:
 
 def connect(db_path: Any = DB_PATH) -> sqlite3.Connection:
     """Abre el SQLite del proyecto y garantiza la tabla wallet_profiles."""
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     conn.executescript(WALLET_PROFILES_SCHEMA)
     conn.commit()
     return conn

@@ -16,6 +16,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from src import db
 from src.collector.models import DB_PATH
 
 logger = logging.getLogger(__name__)
@@ -157,7 +158,7 @@ def _iso(unix_ts: int | None) -> str | None:
 
 def connect(db_path: Any = DB_PATH) -> sqlite3.Connection:
     """Abre el SQLite del proyecto y garantiza la tabla volume_buckets."""
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     conn.executescript(VOLUME_BUCKETS_SCHEMA)
     conn.commit()
     return conn

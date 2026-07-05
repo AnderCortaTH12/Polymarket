@@ -10,6 +10,8 @@ import logging
 import sqlite3
 from pathlib import Path
 
+from src import db
+
 logger = logging.getLogger(__name__)
 
 # La base de datos vive siempre en data/polymarket_politics.db (convencion).
@@ -41,7 +43,7 @@ CREATE INDEX IF NOT EXISTS idx_market_ts ON snapshots (market_id, ts);
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     """Abre (creando si hace falta) la base de datos y garantiza el esquema."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     conn.executescript(SCHEMA)
     conn.commit()
     logger.debug("Conectado a %s", db_path)
