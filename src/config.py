@@ -51,4 +51,4 @@ ALERT_THRESHOLD: int = 50
 # Notificaciones por Telegram (ver DESPLIEGUE_VPS.md). El chat_id es el ID
 # privado del usuario; se obtiene tras escribir /start al bot (paso en la doc).
 TELEGRAM_BOT_TOKEN: str = "8780060569:AAHCElYk_wKHvtJ-xaj697C28wvyCbjQLmc"
-TELEGRAM_CHAT_ID: str | None = None  # rellenar con tu chat_id (ver DESPLIEGUE_VPS.md)
+TELEGRAM_CHAT_ID = 6058306383  # rellenar con tu chat_id (ver DESPLIEGUE_VPS.md)
