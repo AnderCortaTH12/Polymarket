@@ -58,6 +58,38 @@ Notas:
   aunque el envío a Telegram falle (se registra un WARNING).
 - El TOKEN del bot es un secreto: no lo compartas ni lo publiques.
 
+## Paso 4: Ejecutar el backtest
+
+Una semana despues de desplegar, cuando hayas acumulado **>=50 alertas** (cuantas
+mas y mas mercados resueltos, mejor):
+
+```bash
+cd ~/Polymarket
+source .venv/bin/activate
+python -m src.backtest_runner              # todas las alertas
+python -m src.backtest_runner --min-score 50  # solo las de score alto
+```
+
+Simula entrar en cada alerta en el mismo lado que el trader vigilado y cerrar
+segun varias estrategias de salida (por resolucion del mercado, a 24h y a 1
+semana). Genera un informe en `reports/backtest_FECHA.md` con:
+
+- Tabla comparativa de estrategias (retorno medio, % rentables, Sharpe, drawdown).
+- Curva de capital (ASCII) de la mejor estrategia.
+- Predictividad por componente del score: retorno medio de las alertas en las que
+  cada componente (wallet_fresca, longshot, tamaño...) puntuo. Sirve para saber
+  que pesos suben y cuales bajar.
+- Retorno por tramo de longshot (¿los precios <0.10 predicen mejor?).
+- Conclusiones honestas: si los pesos no funcionan, lo dice; si una estrategia de
+  salida gana claramente, lo muestra.
+
+El backtest **solo lee de la BD** (`alerts`); no depende del detector en vivo. Se
+puede ejecutar ahora con pocas alertas para validar la maquinaria (avisara de que
+la muestra es pequeña y no concluyente), y de nuevo en una semana con datos
+reales. Los precios de salida se obtienen de Gamma (final si el mercado esta
+resuelto) y CLOB (serie historica para los horizontes); las alertas cuyo mercado
+sigue abierto o sin historial quedan como "na" y no cuentan.
+
 ## Columna P&L en la pestaña Alertas
 
 La columna **P&L** de la tabla de alertas muestra la ganancia o pérdida de cada
