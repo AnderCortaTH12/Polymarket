@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from src import config
-from src.realtime.stream import Detector, display_name, is_politics_trade, send_ntfy_alert
+from src.realtime.stream import Detector, display_name, is_politics_trade, send_telegram_alert
 from src.realtime import storage
 from src.analysis import profiles
 from src.analysis.profiles import WALLET_PROFILES_SCHEMA
@@ -66,8 +66,8 @@ class TestPureHelpers(unittest.TestCase):
 
 class TestProcessTrade(unittest.TestCase):
     def setUp(self) -> None:
-        # process_trade envia una notificacion ntfy al saltar alerta: parcheamos
-        # el POST para no tocar la red en los tests.
+        # process_trade envia una notificacion de Telegram al saltar alerta:
+        # parcheamos el POST para no tocar la red en los tests.
         patcher = patch("src.realtime.stream.requests.post")
         self.mock_post = patcher.start()
         self.addCleanup(patcher.stop)
@@ -103,23 +103,35 @@ class TestProcessTrade(unittest.TestCase):
         self.assertEqual(det.trades_processed, 1)
         self.assertEqual(det.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 0)
 
-    def test_alerta_envia_ntfy_con_payload(self) -> None:
+    @patch.object(config, "TELEGRAM_CHAT_ID", "999")
+    def test_alerta_envia_telegram_con_payload(self) -> None:
         det = _mem_detector()
         aid = det.process_trade(_trade(size=120000, price=0.10))  # score >= 50
         self.assertIsNotNone(aid)
         self.mock_post.assert_called_once()
         args, kwargs = self.mock_post.call_args
-        self.assertIn(config.NTFY_CHANNEL, args[0])  # URL del canal
+        self.assertIn(config.TELEGRAM_BOT_TOKEN, args[0])  # URL con el token
+        self.assertTrue(args[0].endswith("/sendMessage"))
         payload = kwargs["json"]
-        self.assertEqual(payload["title"], "Will X happen? - Yes")
-        self.assertIn("AlphaTrader", payload["message"])
-        self.assertIn("$12,000", payload["message"])
-        self.assertIn("BUY", payload["message"])
+        self.assertEqual(payload["chat_id"], "999")
+        self.assertEqual(payload["parse_mode"], "HTML")
+        self.assertIn("<b>Will X happen?</b>", payload["text"])
+        self.assertIn("AlphaTrader", payload["text"])
+        self.assertIn("$12,000", payload["text"])
+        self.assertIn("BUY", payload["text"])
 
-    def test_no_alerta_no_envia_ntfy(self) -> None:
+    @patch.object(config, "TELEGRAM_CHAT_ID", "999")
+    def test_no_alerta_no_envia_telegram(self) -> None:
         det = _mem_detector()
         det.process_trade(_trade(size=100, price=0.50))  # score bajo
         self.mock_post.assert_not_called()
+
+    @patch.object(config, "TELEGRAM_CHAT_ID", None)
+    def test_sin_chat_id_no_envia(self) -> None:
+        det = _mem_detector()
+        aid = det.process_trade(_trade(size=120000, price=0.10))  # score >= 50
+        self.assertIsNotNone(aid)          # la alerta se guarda igual
+        self.mock_post.assert_not_called()  # pero no se envia sin chat_id
 
     def test_process_raw_ignora_no_json(self) -> None:
         det = _mem_detector()
@@ -172,21 +184,40 @@ class TestProcessTrade(unittest.TestCase):
         self.assertEqual(det.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 1)
 
 
-class TestSendNtfy(unittest.TestCase):
+class TestSendTelegram(unittest.TestCase):
+    @patch.object(config, "TELEGRAM_CHAT_ID", "12345")
     @patch("src.realtime.stream.requests.post")
-    def test_post_al_canal_con_titulo_y_mensaje(self, mock_post) -> None:
-        send_ntfy_alert({"market_title": "M", "outcome": "Yes", "score": 70,
-                         "username": "u", "size_usd": 12345, "side": "BUY"})
+    def test_post_con_texto_formateado(self, mock_post) -> None:
+        send_telegram_alert({"market_title": "M", "outcome": "Yes", "score": 70,
+                             "username": "u", "size_usd": 12345, "side": "BUY"})
         args, kwargs = mock_post.call_args
-        self.assertTrue(args[0].endswith(config.NTFY_CHANNEL))
-        self.assertEqual(kwargs["json"]["title"], "M - Yes")
-        self.assertIn("Score: 70", kwargs["json"]["message"])
+        self.assertTrue(args[0].endswith("/sendMessage"))
+        self.assertEqual(kwargs["json"]["chat_id"], "12345")
+        self.assertIn("<b>M</b>", kwargs["json"]["text"])
+        self.assertIn("Score: 70", kwargs["json"]["text"])
 
-    @patch("src.realtime.stream.requests.post", side_effect=__import__("requests").RequestException("caida"))
+    @patch.object(config, "TELEGRAM_CHAT_ID", "12345")
+    @patch("src.realtime.stream.requests.post")
+    def test_escapa_html_del_titulo(self, mock_post) -> None:
+        send_telegram_alert({"market_title": "A<b>&", "outcome": "Yes", "score": 1,
+                             "username": "u", "size_usd": 1, "side": "BUY"})
+        text = mock_post.call_args.kwargs["json"]["text"]
+        self.assertIn("A&lt;b&gt;&amp;", text)  # el titulo va escapado
+
+    @patch.object(config, "TELEGRAM_CHAT_ID", None)
+    @patch("src.realtime.stream.requests.post")
+    def test_sin_chat_id_no_postea(self, mock_post) -> None:
+        send_telegram_alert({"market_title": "M", "outcome": "Yes", "score": 1,
+                             "username": "u", "size_usd": 1, "side": "BUY"})
+        mock_post.assert_not_called()
+
+    @patch.object(config, "TELEGRAM_CHAT_ID", "12345")
+    @patch("src.realtime.stream.requests.post",
+           side_effect=__import__("requests").RequestException("caida"))
     def test_fallo_de_red_no_rompe(self, _mock_post) -> None:
         # No debe lanzar aunque el POST falle.
-        send_ntfy_alert({"market_title": "M", "outcome": "Yes", "score": 70,
-                         "username": "u", "size_usd": 1, "side": "BUY"})
+        send_telegram_alert({"market_title": "M", "outcome": "Yes", "score": 70,
+                             "username": "u", "size_usd": 1, "side": "BUY"})
 
 
 if __name__ == "__main__":

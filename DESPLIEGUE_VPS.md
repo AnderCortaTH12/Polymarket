@@ -25,23 +25,35 @@ En un VPS conviene ejecutar el collector y el detector como servicios (systemd)
 para que sobrevivan a reinicios; ambos escriben a la misma base de datos SQLite
 (`data/polymarket_politics.db`, en modo WAL para lectura/escritura concurrente).
 
-## Notificaciones en el móvil (ntfy.sh)
+## Notificaciones por Telegram
 
-El detector envía una notificación push cada vez que una alerta supera el umbral
-de score (`ALERT_THRESHOLD`). Usa [ntfy.sh](https://ntfy.sh), un servicio
-gratuito: el detector hace un POST a `https://ntfy.sh/{canal}` y quien esté
-suscrito a ese canal recibe la notificación.
+El detector envía un mensaje privado de Telegram cada vez que una alerta supera
+el umbral de score (`ALERT_THRESHOLD`), con push notification en el móvil.
 
-Para recibir notificaciones en el móvil:
+Configuración (una sola vez):
 
-1. Instala la app **ntfy.sh** (App Store / Play Store).
-2. En la app, suscríbete al canal: **`polymarket-alerts-corta-2026`**
-   (definido en `src/config.py` como `NTFY_CHANNEL`).
-3. Cuando el detector genere alertas, recibirás notificaciones push con el
-   título del mercado, el outcome, el score, el usuario, el tamaño en $ y el lado.
+1. Instala **Telegram** (App Store / Play Store) si no lo tienes.
+2. En Telegram, busca **@BotFather**, crea un bot nuevo (`/newbot`) y copia el
+   **TOKEN** que te da.
+3. Reemplaza `TELEGRAM_BOT_TOKEN` en `src/config.py` con tu TOKEN real.
+4. Busca tu nuevo bot por su username en Telegram y abre el chat.
+5. Escribe **`/start`** en el chat privado con tu bot.
+6. Obtén tu `chat_id` (un número largo). Desde el VPS:
+
+   ```bash
+   python -c "from src.realtime.stream import get_telegram_chat_id; print(get_telegram_chat_id())"
+   ```
+
+   Imprime tu `chat_id` leyendo el último mensaje que le enviaste al bot.
+   (Requiere haber escrito `/start` antes.)
+7. En `src/config.py`, rellena `TELEGRAM_CHAT_ID = "<el número>"`.
+8. En el VPS: `git pull && systemctl restart pm-detector`.
+9. Cuando el detector genere alertas, recibirás mensajes de Telegram en tiempo
+   real con el mercado, el outcome, el tamaño en $, el score, el usuario y el lado.
 
 Notas:
-- El canal es público: cualquiera que lo conozca puede suscribirse. Si quieres
-  privacidad, cámbialo por un nombre difícil de adivinar en `NTFY_CHANNEL`.
+- Si `TELEGRAM_CHAT_ID` está sin configurar, el detector funciona igual pero no
+  envía notificaciones (registra un WARNING).
 - La notificación es un extra: la alerta siempre se guarda en la tabla `alerts`
-  de la base de datos aunque el envío a ntfy falle (se registra un WARNING).
+  aunque el envío a Telegram falle (se registra un WARNING).
+- El TOKEN del bot es un secreto: no lo compartas ni lo publiques.

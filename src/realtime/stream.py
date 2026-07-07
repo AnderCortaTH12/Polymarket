@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import html
 import logging
 import time
 from datetime import datetime, timezone
@@ -44,8 +45,8 @@ logger = logging.getLogger(__name__)
 
 # No hardcodear URLs sueltas: constantes al inicio del modulo.
 WS_URL: str = "wss://ws-live-data.polymarket.com"
-NTFY_BASE_URL: str = "https://ntfy.sh"  # notificaciones push (canal en config)
-NTFY_TIMEOUT_S: int = 10
+TELEGRAM_API_BASE: str = "https://api.telegram.org"  # notificaciones push (token en config)
+TELEGRAM_TIMEOUT_S: int = 10
 SUBSCRIBE_MSG: dict[str, Any] = {
     "action": "subscribe",
     "subscriptions": [{"topic": "activity", "type": "trades", "filters": ""}],
@@ -77,25 +78,62 @@ def is_politics_trade(trade: dict[str, Any], politics_conditions: set[str]) -> b
     return trade.get("conditionId") in politics_conditions
 
 
-def send_ntfy_alert(alert_info: dict[str, Any]) -> None:
-    """Envia una notificacion push a ntfy.sh por una alerta. Nunca lanza.
+def _telegram_url(method: str) -> str:
+    """URL de un metodo de la Bot API de Telegram con el token de config."""
+    return f"{TELEGRAM_API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/{method}"
 
-    Es un extra: la alerta ya se guardo en BD. Si el POST falla (red caida,
-    etc.) se loguea WARNING y el flujo del detector continua sin romperse.
+
+def send_telegram_alert(alert_info: dict[str, Any]) -> None:
+    """Envia una alerta al chat privado de Telegram del usuario. Nunca lanza.
+
+    Es un extra: la alerta ya se guardo en BD. Si falta el chat_id o el POST
+    falla (red caida, etc.) se loguea WARNING y el detector continua.
     """
-    title = f"{alert_info.get('market_title', '')} - {alert_info.get('outcome', '')}"
-    message = (
-        f"Score: {alert_info.get('score')} | {alert_info.get('username', '')} | "
-        f"${alert_info.get('size_usd', 0):,.0f} | {alert_info.get('side', '')}"
+    chat_id = config.TELEGRAM_CHAT_ID
+    if not chat_id:
+        logger.warning("TELEGRAM_CHAT_ID sin configurar; no se envia la notificacion "
+                       "(ver DESPLIEGUE_VPS.md para obtenerlo con /start)")
+        return
+
+    # Escapamos el texto dinamico porque usamos parse_mode HTML.
+    title = html.escape(str(alert_info.get("market_title", "")))
+    outcome = html.escape(str(alert_info.get("outcome", "")))
+    username = html.escape(str(alert_info.get("username", "")))
+    side = html.escape(str(alert_info.get("side", "")))
+    text = (
+        f"<b>{title}</b>\n"
+        f"{outcome} | ${alert_info.get('size_usd', 0):,.0f}\n"
+        f"Score: {alert_info.get('score')} | {username} | {side}"
     )
     try:
         requests.post(
-            f"{NTFY_BASE_URL}/{config.NTFY_CHANNEL}",
-            json={"title": title, "message": message},
-            timeout=NTFY_TIMEOUT_S,
+            _telegram_url("sendMessage"),
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=TELEGRAM_TIMEOUT_S,
         )
     except requests.RequestException as exc:
-        logger.warning("No se pudo enviar la notificacion ntfy: %s", exc)
+        logger.warning("No se pudo enviar la notificacion de Telegram: %s", exc)
+
+
+def get_telegram_chat_id() -> str | None:
+    """Devuelve tu chat_id leyendo el ultimo mensaje recibido por el bot.
+
+    Escribe primero /start (o cualquier mensaje) al bot en Telegram y luego
+    ejecuta esta funcion; consulta getUpdates y extrae el chat.id del mensaje
+    mas reciente. Copia el numero a TELEGRAM_CHAT_ID en src/config.py.
+    """
+    try:
+        payload = requests.get(_telegram_url("getUpdates"), timeout=TELEGRAM_TIMEOUT_S).json()
+    except requests.RequestException as exc:
+        logger.warning("No se pudo consultar getUpdates: %s", exc)
+        return None
+    for update in reversed(payload.get("result", []) or []):
+        msg = update.get("message") or update.get("edited_message") or {}
+        chat = msg.get("chat") or {}
+        if chat.get("id") is not None:
+            return str(chat["id"])
+    logger.warning("Sin mensajes recientes. Escribe /start al bot en Telegram y reintenta.")
+    return None
 
 
 def _to_iso(unix_ts: Any) -> str:
@@ -269,7 +307,7 @@ class Detector:
 
         # 7b. Notificacion push (bonus; nunca debe romper el flujo del detector)
         if alert_id:
-            send_ntfy_alert({
+            send_telegram_alert({
                 "market_title": trade.get("title") or trade.get("slug") or "",
                 "outcome": trade.get("outcome") or "",
                 "score": score.score_total,

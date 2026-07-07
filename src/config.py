@@ -48,5 +48,7 @@ INSENSIBILITY_MIN_STREAK: int = 3
 # Score minimo para generar una alerta.
 ALERT_THRESHOLD: int = 50
 
-# Canal de ntfy.sh para notificaciones push al movil (ver DESPLIEGUE_VPS.md).
-NTFY_CHANNEL: str = "polymarket-alerts-corta-2026"
+# Notificaciones por Telegram (ver DESPLIEGUE_VPS.md). El chat_id es el ID
+# privado del usuario; se obtiene tras escribir /start al bot (paso en la doc).
+TELEGRAM_BOT_TOKEN: str = "8780060569:AAHCElYk_wKHvtJ-xaj697C28wvyCbjQLmc"
+TELEGRAM_CHAT_ID: str | None = None  # rellenar con tu chat_id (ver DESPLIEGUE_VPS.md)
