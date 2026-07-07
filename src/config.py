@@ -47,3 +47,6 @@ INSENSIBILITY_MIN_STREAK: int = 3
 
 # Score minimo para generar una alerta.
 ALERT_THRESHOLD: int = 50
+
+# Canal de ntfy.sh para notificaciones push al movil (ver DESPLIEGUE_VPS.md).
+NTFY_CHANNEL: str = "polymarket-alerts-corta-2026"

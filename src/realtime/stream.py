@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import requests
 import websockets
 
 from src import config
@@ -43,6 +44,8 @@ logger = logging.getLogger(__name__)
 
 # No hardcodear URLs sueltas: constantes al inicio del modulo.
 WS_URL: str = "wss://ws-live-data.polymarket.com"
+NTFY_BASE_URL: str = "https://ntfy.sh"  # notificaciones push (canal en config)
+NTFY_TIMEOUT_S: int = 10
 SUBSCRIBE_MSG: dict[str, Any] = {
     "action": "subscribe",
     "subscriptions": [{"topic": "activity", "type": "trades", "filters": ""}],
@@ -72,6 +75,27 @@ def display_name(trade: dict[str, Any]) -> str:
 def is_politics_trade(trade: dict[str, Any], politics_conditions: set[str]) -> bool:
     """True si el conditionId del trade esta en el set de mercados de politica."""
     return trade.get("conditionId") in politics_conditions
+
+
+def send_ntfy_alert(alert_info: dict[str, Any]) -> None:
+    """Envia una notificacion push a ntfy.sh por una alerta. Nunca lanza.
+
+    Es un extra: la alerta ya se guardo en BD. Si el POST falla (red caida,
+    etc.) se loguea WARNING y el flujo del detector continua sin romperse.
+    """
+    title = f"{alert_info.get('market_title', '')} - {alert_info.get('outcome', '')}"
+    message = (
+        f"Score: {alert_info.get('score')} | {alert_info.get('username', '')} | "
+        f"${alert_info.get('size_usd', 0):,.0f} | {alert_info.get('side', '')}"
+    )
+    try:
+        requests.post(
+            f"{NTFY_BASE_URL}/{config.NTFY_CHANNEL}",
+            json={"title": title, "message": message},
+            timeout=NTFY_TIMEOUT_S,
+        )
+    except requests.RequestException as exc:
+        logger.warning("No se pudo enviar la notificacion ntfy: %s", exc)
 
 
 def _to_iso(unix_ts: Any) -> str:
@@ -242,6 +266,17 @@ class Detector:
             score.score_total, cid, display_name(trade), wallet,
             _trade_usd(trade), trade.get("transactionHash"),
         )
+
+        # 7b. Notificacion push (bonus; nunca debe romper el flujo del detector)
+        if alert_id:
+            send_ntfy_alert({
+                "market_title": trade.get("title") or trade.get("slug") or "",
+                "outcome": trade.get("outcome") or "",
+                "score": score.score_total,
+                "username": display_name(trade),
+                "size_usd": _trade_usd(trade),
+                "side": trade.get("side") or "",
+            })
         return alert_id
 
     # --- refrescos (con red, fuera del camino critico) ----------------------
