@@ -57,3 +57,13 @@ Notas:
 - La notificación es un extra: la alerta siempre se guarda en la tabla `alerts`
   aunque el envío a Telegram falle (se registra un WARNING).
 - El TOKEN del bot es un secreto: no lo compartas ni lo publiques.
+
+## Columna P&L en la pestaña Alertas
+
+La columna **P&L** de la tabla de alertas muestra la ganancia o pérdida de cada
+alerta al precio actual del mercado (shares = tamaño$ / precio de entrada, y la
+diferencia contra el precio actual del outcome). Se refresca cada 60 segundos
+(precios cacheados). En verde si es ganancia, rojo si es pérdida, gris si es
+cero o no disponible. Si el mercado ya está resuelto, muestra **"Resuelto"** con
+el payout final (las shares valen 1$ si el outcome ganó, 0$ si perdió); si el
+mercado no se encuentra o la API falla, muestra **"N/A"**.

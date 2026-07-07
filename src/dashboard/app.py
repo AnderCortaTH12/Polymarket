@@ -25,10 +25,18 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src import db
+from src.analysis.pnl import format_pnl_cell
 from src.analysis.whales import Whale, politics_portfolio_share, rank_whales
 from src.client.clob import get_price_history
 from src.client.data_api import get_user_positions
-from src.client.gamma import flatten_markets, get_politics_events
+from src.client.gamma import (
+    _is_truthy,
+    _parse_json_field,
+    _to_float,
+    flatten_markets,
+    get_market_by_condition,
+    get_politics_events,
+)
 from src.collector.models import DB_PATH
 from src.realtime import storage
 
@@ -135,6 +143,31 @@ def load_alerts(min_score: int, limit: int) -> pd.DataFrame:
     finally:
         conn.close()
     return df
+
+
+@st.cache_data(ttl=60)
+def market_price_state(condition_id: str, outcome: str) -> dict[str, Any]:
+    """Precio actual del outcome y si el mercado esta resuelto. Cacheado 60s.
+
+    Devuelve {"status": "active"|"resolved"|"na", "price": float|None}. Usa Gamma
+    por condition_id (da precio actual o final + flag closed en un solo sitio).
+    """
+    try:
+        market = get_market_by_condition(condition_id)
+    except Exception:  # noqa: BLE001 - fallo de API => N/A, no rompe la tabla
+        return {"status": "na", "price": None}
+    if not market:
+        return {"status": "na", "price": None}
+    outcomes = _parse_json_field(market.get("outcomes")) or []
+    prices = [_to_float(p) for p in (_parse_json_field(market.get("outcomePrices")) or [])]
+    if outcome not in outcomes:
+        return {"status": "na", "price": None}
+    idx = outcomes.index(outcome)
+    price = prices[idx] if idx < len(prices) else None
+    if price is None:
+        return {"status": "na", "price": None}
+    status = "resolved" if _is_truthy(market.get("closed")) else "active"
+    return {"status": status, "price": price}
 
 
 def detector_status() -> dict[str, Any]:
@@ -506,6 +539,12 @@ def render_alerts() -> None:
         ts = r.get("trade_side") or ""
         return f"{outcome} ({ts})" if ts else str(outcome)
 
+    def _pnl(r: pd.Series) -> str:
+        # P&L al precio actual del outcome (o payout final si esta resuelto).
+        state = market_price_state(r.get("condition_id") or "", r.get("side") or "")
+        return format_pnl_cell(r.get("price_at_detection"), r.get("trade_size_usd"),
+                               r.get("trade_side"), state)
+
     view = pd.DataFrame({
         "Fecha": pd.to_datetime(alerts["ts"], errors="coerce"),
         "Mercado": alerts["market_question"],
@@ -514,10 +553,21 @@ def render_alerts() -> None:
         "Lado": alerts.apply(_lado, axis=1),
         "Tamaño ($)": pd.to_numeric(alerts["trade_size_usd"], errors="coerce"),
         "Score": pd.to_numeric(alerts["score_total"], errors="coerce"),
+        "P&L": alerts.apply(_pnl, axis=1),
     })
 
+    def _pnl_color(val: Any) -> str:
+        """Verde si ganancia, rojo si perdida, gris en el resto (0, N/A, Resuelto)."""
+        if isinstance(val, str) and val.startswith("+$"):
+            return "color: #16a34a"   # verde
+        if isinstance(val, str) and val.startswith("-$"):
+            return "color: #dc2626"   # rojo
+        return "color: #6b7280"       # gris
+
+    styled = view.style.map(_pnl_color, subset=["P&L"])
+
     event = st.dataframe(
-        view,
+        styled,
         width="stretch",
         hide_index=True,
         on_select="rerun",

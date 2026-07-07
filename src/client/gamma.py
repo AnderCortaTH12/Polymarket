@@ -22,6 +22,24 @@ EVENTS_ENDPOINT: str = f"{GAMMA_BASE_URL}/events"
 # Tamaño de página para la paginación por offset.
 PAGE_LIMIT: int = 100
 POLYMARKET_MARKET_URL: str = "https://polymarket.com/event"
+MARKETS_ENDPOINT: str = f"{GAMMA_BASE_URL}/markets"
+
+
+def get_market_by_condition(condition_id: str) -> dict[str, Any] | None:
+    """Devuelve el mercado (crudo) con ese condition_id, activo o resuelto.
+
+    El endpoint /markets filtra por defecto a mercados no cerrados; para los ya
+    resueltos hay que pedir `closed=true`. Se prueban ambos y se devuelve el que
+    coincide exactamente por conditionId. Sirve para leer el precio actual (o
+    final si esta resuelto) y el flag `closed` en un solo sitio.
+    """
+    for params in ({"condition_ids": condition_id}, {"condition_ids": condition_id, "closed": "true"}):
+        data = get_json(MARKETS_ENDPOINT, params=params)
+        if isinstance(data, list):
+            for market in data:
+                if market.get("conditionId") == condition_id:
+                    return market
+    return None
 
 
 def get_politics_events(page_limit: int = PAGE_LIMIT) -> list[dict[str, Any]]:
