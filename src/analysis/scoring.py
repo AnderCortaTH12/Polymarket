@@ -34,6 +34,9 @@ class ScoreBreakdown:
     # Traza: True si flujo_toxico se silencio por volumen de cubo insuficiente
     # (la direccion era fuerte pero habia muy poco dinero para fiarse).
     flujo_toxico_silenciado: bool = False
+    # Traza: precio_maximo del tramo de longshot que puntuo (o None si no aplico),
+    # para analizar el rendimiento por tramo en el backtest.
+    longshot_tier: float | None = None
     score_total: int = 0
 
     def components(self) -> dict[str, Any]:
@@ -89,13 +92,15 @@ def compute_score(
         b.tamano_anomalo = w["tamano_anomalo"]
 
     # --- Longshot con conviccion (comprar un outcome improbable) ------------
-    if (
-        side == "BUY"
-        and price is not None
-        and price < config.LONGSHOT_MAX_PROB
-        and trade_usd > config.LONGSHOT_MIN_TRADE_USD
-    ):
-        b.longshot = w["longshot"]
+    # El minimo en $ escala con lo extremo del precio (config.LONGSHOT_TIERS):
+    # se aplica el primer tramo cuyo precio_maximo cubra el precio del trade.
+    if side == "BUY" and price is not None:
+        for price_max, min_usd in config.LONGSHOT_TIERS:
+            if price <= price_max:
+                if trade_usd >= min_usd:
+                    b.longshot = w["longshot"]
+                    b.longshot_tier = price_max
+                break  # solo el tramo mas restrictivo aplicable
 
     # --- Track record sospechoso -------------------------------------------
     win_rate = getattr(wallet_profile, "win_rate", None) if wallet_profile else None

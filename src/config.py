@@ -25,8 +25,15 @@ FRESH_WALLET_DAYS: float = 7.0
 VERY_FRESH_WALLET_DAYS: float = 2.0
 NO_PROFILE_MIN_TRADE_USD: float = 2_500.0
 BIG_TRADE_USD: float = 10_000.0
-LONGSHOT_MAX_PROB: float = 0.35
-LONGSHOT_MIN_TRADE_USD: float = 2_500.0
+# Longshot por tramos: un ticket pequeño a precio extremo es una conviccion
+# grande en payout ($800 a 0.07 = ~11.400 shares), asi que el minimo en $ escala
+# con lo extremo del precio. (precio_maximo, minimo_usd): se aplica el PRIMER
+# tramo cuyo precio_maximo >= precio del trade. Precio > 0.35 => no aplica.
+LONGSHOT_TIERS: list[tuple[float, float]] = [
+    (0.10, 500.0),    # precio extremo: basta $500
+    (0.20, 1_200.0),  # precio muy bajo: $1.200
+    (0.35, 2_500.0),  # resto: el umbral original
+]
 SUSPICIOUS_WIN_RATE: float = 0.8
 MIN_RESOLVED_FOR_WINRATE: int = 10
 CONCENTRATION_MIN: float = 0.7

@@ -347,15 +347,33 @@ def build_report(query: str = DEFAULT_MADURO_QUERY, candidates: int = DEFAULT_CA
         "de YES a 0.06-0.21 en dic-ene, pero PEQUEÑAS ($774-$862)."
     )
     lines.append("")
+    lines.append("### Antes / despues del longshot por tramos")
+    lines.append("")
     lines.append(
-        "Con los pesos actuales esas entradas pequeñas solo activan wallet_fresca (+25 si la wallet "
-        "es nueva), insuficiente para el umbral de 50. Los componentes longshot (+20), sin_perfil "
-        "(+20) y tamaño (+15) exigen trade > $2.500 / $10.000, asi que NO disparan en compras de "
-        "~$800 aunque sean a precio de longshot. Implicacion: el detector probablemente marcaria al "
-        "insider GRANDE (trades > $2.5k a 0.07 => longshot + posible sin_perfil/tamaño), pero se le "
-        "escapan las entradas tempranas pequeñas a precio muy bajo. Para pillarlas habria que bajar "
-        "el minimo en $ del componente longshot cuando el precio es extremadamente bajo (<0.10), o "
-        "dar mas peso a la freshness. Se decidira con mas casos y el backtest cuantitativo."
+        "ANTES (umbral fijo $2.500 para el longshot): estas entradas pequeñas (~$800) NO activaban "
+        "el componente longshot; a lo sumo sumaban wallet_fresca, con lo que su score se quedaba muy "
+        "por debajo del umbral 50."
+    )
+    lines.append(
+        "DESPUES (LONGSHOT_TIERS: $500 a precio <=0.10, $1.200 a <=0.20, $2.500 a <=0.35): las "
+        "compras de YES a precio extremo (0.06-0.09) por ~$800 ya activan longshot (+20), que es la "
+        "señal correcta (conviccion en payout). Sumado a la freshness cuando la wallet es nueva, el "
+        "score sube claramente frente al escenario anterior."
+    )
+    lines.append("")
+    lines.append(
+        f"Resultado tras el cambio: {marcadas}/{len(wallets)} marcadas (ver score por wallet arriba). "
+        "El ajuste sube los scores en la direccion correcta; las que no cruzan se quedan cerca del "
+        "umbral y solo lo pasarian con otra señal (freshness muy reciente, sin_perfil, o el tamaño del "
+        "insider GRANDE que aqui no es recuperable). NO se han tocado mas pesos para 'hacer que pase': "
+        "el umbral y la escala se calibraran con el backtest cuantitativo del Paso 4. El campo "
+        "longshot_tier se guarda en cada score para analizar el rendimiento por tramo."
+    )
+    lines.append("")
+    lines.append(
+        "Nota: la edad de wallet (componente wallet_fresca) se obtiene de la primera tx de funding via "
+        "Polygonscan; si esa consulta throttlea, la edad queda desconocida y el score de esa wallet "
+        "baja, por lo que el conteo de marcadas puede variar ligeramente entre ejecuciones."
     )
     return "\n".join(lines)
 

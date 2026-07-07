@@ -67,6 +67,48 @@ class TestComputeScore(unittest.TestCase):
         s2 = compute_score(_trade(side="SELL", size=50000, price=0.10), FakeProfile(wallet_age_days=300), 0.0)
         self.assertEqual(s2.longshot, 0)
 
+
+class TestLongshotTiers(unittest.TestCase):
+    """El minimo en $ del longshot escala con lo extremo del precio."""
+
+    PROF = FakeProfile(wallet_age_days=300)
+
+    def _score(self, usd: float, price: float):
+        # size tal que size*price = usd
+        return compute_score(_trade(size=usd / price, price=price), self.PROF, 0.0)
+
+    def test_600_a_007_puntua_tramo_extremo(self) -> None:
+        s = self._score(600, 0.07)
+        self.assertEqual(s.longshot, W["longshot"])
+        self.assertEqual(s.longshot_tier, 0.10)
+
+    def test_600_a_015_no_puntua(self) -> None:
+        # tramo 0.20 exige $1.200
+        s = self._score(600, 0.15)
+        self.assertEqual(s.longshot, 0)
+        self.assertIsNone(s.longshot_tier)
+
+    def test_1500_a_015_puntua_tramo_020(self) -> None:
+        s = self._score(1500, 0.15)
+        self.assertEqual(s.longshot, W["longshot"])
+        self.assertEqual(s.longshot_tier, 0.20)
+
+    def test_2600_a_030_puntua_tramo_035_original(self) -> None:
+        s = self._score(2600, 0.30)
+        self.assertEqual(s.longshot, W["longshot"])
+        self.assertEqual(s.longshot_tier, 0.35)
+
+    def test_3000_a_050_fuera_de_tramos(self) -> None:
+        s = self._score(3000, 0.50)
+        self.assertEqual(s.longshot, 0)
+        self.assertIsNone(s.longshot_tier)
+
+    def test_2000_a_030_no_llega_al_minimo(self) -> None:
+        # tramo 0.35 exige $2.500; $2.000 no llega
+        s = self._score(2000, 0.30)
+        self.assertEqual(s.longshot, 0)
+        self.assertIsNone(s.longshot_tier)
+
     def test_8_track_record_sospechoso(self) -> None:
         prof = FakeProfile(wallet_age_days=300, win_rate=0.9, n_resolved=20)
         s = compute_score(_trade(), prof, 0.0)
