@@ -8,3 +8,4 @@ data/*.db
 .claude/
 logs/
 notas.txt
+reports/

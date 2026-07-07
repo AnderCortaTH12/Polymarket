@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import requests
+
 from src.client.http import get_json
 
 logger = logging.getLogger(__name__)
@@ -23,16 +25,42 @@ POSITIONS_ENDPOINT: str = f"{DATA_BASE_URL}/positions"
 DEFAULT_LIMIT: int = 100
 
 
-def get_market_trades(condition_id: str, limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
-    """Ultimos trades de un mercado (incluye la proxyWallet de cada usuario).
+def get_market_trades(
+    condition_id: str,
+    limit: int = DEFAULT_LIMIT,
+    max_trades: int | None = None,
+) -> list[dict[str, Any]]:
+    """Trades de un mercado (incluye la proxyWallet de cada usuario).
 
     El endpoint usa el parametro `market`, que aqui es el condition_id del
-    mercado (no el CLOB token id).
+    mercado (no el CLOB token id). Sin `max_trades`, una sola llamada de `limit`
+    trades (los mas recientes). Con `max_trades`, pagina con offset hasta ese
+    tope (el endpoint devuelve como mucho los ~ultimos miles, no toda la historia).
     """
-    params = {"market": condition_id, "limit": limit}
-    trades = get_json(TRADES_ENDPOINT, params=params)
-    trades = trades if isinstance(trades, list) else []
-    logger.info("trades market=%s -> %d trades", condition_id, len(trades))
+    if max_trades is None:
+        params = {"market": condition_id, "limit": limit}
+        trades = get_json(TRADES_ENDPOINT, params=params)
+        trades = [t for t in trades if isinstance(t, dict)] if isinstance(trades, list) else []
+        logger.info("trades market=%s -> %d trades", condition_id, len(trades))
+        return trades
+
+    trades: list[dict[str, Any]] = []
+    offset = 0
+    while len(trades) < max_trades:
+        page_limit = min(TRADES_PAGE_SIZE, max_trades - len(trades))
+        params = {"market": condition_id, "limit": page_limit, "offset": offset}
+        try:
+            page = get_json(TRADES_ENDPOINT, params=params)
+        except requests.HTTPError:
+            # El endpoint responde 400 al pasar del tope de offset disponible:
+            # es el fin de los datos, no un error real.
+            break
+        page = [t for t in page if isinstance(t, dict)] if isinstance(page, list) else []
+        trades.extend(page)
+        if len(page) < page_limit:
+            break
+        offset += page_limit
+    logger.info("trades market=%s -> %d trades (paginado)", condition_id, len(trades))
     return trades
 
 
