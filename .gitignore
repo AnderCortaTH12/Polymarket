@@ -9,3 +9,5 @@ data/*.db
 logs/
 notas.txt
 reports/
+*.db-wal
+*.db-shm
