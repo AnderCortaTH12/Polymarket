@@ -1,11 +1,23 @@
 """Tests de las funciones puras de perfilado de wallets (sin red)."""
+import os
+import tempfile
 import unittest
+from unittest.mock import patch
 
+from src.analysis import profiles
 from src.analysis.profiles import (
+    PROFILE_MAX_POSITIONS,
+    build_profile,
     compute_trade_stats,
     compute_win_stats,
+    ensure_profiles_schema,
+    load_profile,
+    save_profile,
+    WalletProfile,
     _age_days_from_ts,
 )
+from src.client.data_api import NEUTRAL_SORT_BY
+from src import db
 
 
 def _trade(cid: str, size: float, price: float, ts: int) -> dict:
@@ -58,6 +70,79 @@ class TestComputeWinStats(unittest.TestCase):
         s = compute_win_stats([{"curPrice": 0.5, "avgPrice": 0.5}])
         self.assertIsNone(s["win_rate"])
         self.assertEqual(s["n_resolved"], 0)
+
+
+class TestBuildProfileSurvivorship(unittest.TestCase):
+    """El win_rate no debe sufrir sesgo de supervivencia (Fase 1b)."""
+
+    def _patches(self, positions):
+        # build_profile hace 4 llamadas de red; las mockeamos todas.
+        return (
+            patch("src.analysis.profiles.get_user_trades", return_value=[]),
+            patch("src.analysis.profiles.get_user_positions", return_value=positions),
+            patch("src.analysis.profiles.get_first_token_transfers", return_value=[]),
+            patch("src.analysis.profiles.get_first_transactions", return_value=[]),
+        )
+
+    def test_pide_orden_neutral_y_tope_alto(self) -> None:
+        p_tr, p_pos, p_tk, p_tx = self._patches([])
+        with p_tr, p_pos as mock_pos, p_tk, p_tx:
+            build_profile("0xW")
+        _, kwargs = mock_pos.call_args
+        self.assertEqual(kwargs.get("sort_by"), NEUTRAL_SORT_BY)
+        self.assertEqual(kwargs.get("max_positions"), PROFILE_MAX_POSITIONS)
+
+    def test_truncamiento_marca_win_rate_no_fiable(self) -> None:
+        # Devuelve EXACTAMENTE el tope => muestra truncada => no fiable.
+        positions = [{"curPrice": 1.0, "avgPrice": 0.5}] * PROFILE_MAX_POSITIONS
+        p_tr, p_pos, p_tk, p_tx = self._patches(positions)
+        with p_tr, p_pos, p_tk, p_tx:
+            prof = build_profile("0xW")
+        self.assertFalse(prof.win_rate_reliable)
+
+    def test_sin_truncamiento_win_rate_fiable(self) -> None:
+        positions = [{"curPrice": 1.0, "avgPrice": 0.5}, {"curPrice": 0.0, "avgPrice": 0.5}]
+        p_tr, p_pos, p_tk, p_tx = self._patches(positions)
+        with p_tr, p_pos, p_tk, p_tx:
+            prof = build_profile("0xW")
+        self.assertTrue(prof.win_rate_reliable)
+
+
+class TestProfilesMigration(unittest.TestCase):
+    def test_win_rate_reliable_idempotente(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.db")
+            # Tabla vieja SIN la columna win_rate_reliable, con una fila.
+            conn = db.connect(path)
+            conn.executescript(
+                "CREATE TABLE wallet_profiles (wallet TEXT PRIMARY KEY, win_rate REAL, updated_at TEXT);"
+            )
+            conn.execute("INSERT INTO wallet_profiles (wallet, win_rate) VALUES ('0xW', 0.99)")
+            conn.commit()
+            conn.close()
+
+            conn = db.connect(path)
+            ensure_profiles_schema(conn)  # migra
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(wallet_profiles)")}
+            self.assertIn("win_rate_reliable", cols)
+            # La fila vieja se marca como NO fiable (0).
+            val = conn.execute("SELECT win_rate_reliable FROM wallet_profiles WHERE wallet='0xW'").fetchone()[0]
+            self.assertEqual(val, 0)
+            conn.close()
+
+            # Idempotente: reejecutar no falla ni cambia nada.
+            conn = db.connect(path)
+            ensure_profiles_schema(conn)
+            val2 = conn.execute("SELECT win_rate_reliable FROM wallet_profiles WHERE wallet='0xW'").fetchone()[0]
+            self.assertEqual(val2, 0)
+            conn.close()
+
+    def test_roundtrip_conserva_win_rate_reliable(self) -> None:
+        conn = profiles.connect(":memory:")
+        save_profile(conn, WalletProfile(wallet="0xW", win_rate=0.9, win_rate_reliable=False))
+        loaded = load_profile(conn, "0xW")
+        self.assertFalse(loaded.win_rate_reliable)
+        conn.close()
 
 
 class TestAgeDays(unittest.TestCase):

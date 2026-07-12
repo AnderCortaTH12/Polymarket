@@ -112,6 +112,15 @@ def get_market_holders(condition_id: str, limit: int = DEFAULT_LIMIT) -> list[di
 
 PAGE_SIZE: int = 500  # maximo por pagina del endpoint de positions
 
+# Orden NEUTRAL respecto al resultado (ganar/perder), para el perfilado.
+# CUIDADO CON EL SESGO DE SUPERVIVENCIA: el orden por defecto (CURRENT/DESC)
+# ordena por valor actual; en mercados resueltos la posicion GANADORA vale
+# ~$1/share (va al principio) y la PERDEDORA vale $0 (va al final). Si ademas se
+# trunca a `max_positions`, se descartan sistematicamente las perdidas y el
+# win_rate sale inflado. Para calcular el win_rate hay que ordenar por algo NO
+# correlacionado con el resultado: el titulo del mercado (alfabetico) sirve.
+NEUTRAL_SORT_BY: str = "TITLE"
+
 
 def get_user_positions(
     proxy_wallet: str,
@@ -130,10 +139,19 @@ def get_user_positions(
     Con `max_positions=None` se recorre la cartera completa (usar solo offline,
     p.ej. para el ranking, no en el dashboard interactivo).
 
+    SESGO DE SUPERVIVENCIA (importante): el orden por defecto CURRENT/DESC es
+    correcto para el dashboard (mostrar las mayores posiciones de una ballena),
+    pero LETAL si se usa para calcular un win_rate y se trunca la lista: las
+    posiciones perdedoras (valor ~$0) caen al final y se descartan al truncar, lo
+    que infla el win_rate. Para el win_rate usa `sort_by=NEUTRAL_SORT_BY` (orden
+    no correlacionado con ganar/perder) y detecta el truncamiento. No cambies el
+    default: `whales.py` y el dashboard dependen de CURRENT/DESC.
+
     Args:
         proxy_wallet: wallet a consultar.
         max_positions: tope de posiciones a traer (None = todas).
-        sort_by: campo de orden del servidor (CURRENT = valor actual).
+        sort_by: campo de orden del servidor (CURRENT = valor actual; usar
+            NEUTRAL_SORT_BY para el perfilado del win_rate).
         sort_direction: ASC o DESC.
     """
     positions: list[dict[str, Any]] = []

@@ -103,10 +103,15 @@ def compute_score(
                 break  # solo el tramo mas restrictivo aplicable
 
     # --- Track record sospechoso -------------------------------------------
+    # Solo puntua si el win_rate es FIABLE: si la muestra de posiciones se trunco
+    # (sesgo de supervivencia), sabemos que el win_rate esta inflado y no lo
+    # usamos; es preferible no puntuar a puntuar con un dato sesgado.
     win_rate = getattr(wallet_profile, "win_rate", None) if wallet_profile else None
     n_resolved = getattr(wallet_profile, "n_resolved", 0) if wallet_profile else 0
+    win_rate_reliable = getattr(wallet_profile, "win_rate_reliable", True) if wallet_profile else True
     if (
         win_rate is not None
+        and win_rate_reliable
         and win_rate > config.SUSPICIOUS_WIN_RATE
         and n_resolved >= config.MIN_RESOLVED_FOR_WINRATE
     ):

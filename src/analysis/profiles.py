@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src import db
-from src.client.data_api import get_user_positions, get_user_trades
+from src.client.data_api import NEUTRAL_SORT_BY, get_user_positions, get_user_trades
 from src.client.polygonscan import get_first_token_transfers, get_first_transactions
 from src.collector.models import DB_PATH
 
@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 RESOLVED_WIN_PRICE: float = 0.98   # >= => el outcome que tiene practicamente gano
 RESOLVED_LOSS_PRICE: float = 0.02  # <= => practicamente perdio
 LONGSHOT_PROB: float = 0.35        # entrada por debajo de esta prob = longshot
+
+# Tope de posiciones a traer para el win_rate. Alto a proposito: solo perfilamos
+# wallets que pasan el filtro de $2.500 y como mucho una vez por TTL, asi que el
+# coste es asumible y evita truncar wallets muy activas (544 mercados => >500).
+PROFILE_MAX_POSITIONS: int = 2000
 
 WALLET_PROFILES_SCHEMA: str = """
 CREATE TABLE IF NOT EXISTS wallet_profiles (
@@ -42,9 +47,16 @@ CREATE TABLE IF NOT EXISTS wallet_profiles (
     longshot_wins       INTEGER,
     funding_cluster_id  TEXT,   -- direccion del funder (wallets hermanas la comparten)
     avg_trade_size_usd  REAL,
+    win_rate_reliable   INTEGER,-- 0 si la muestra se trunco (win_rate sesgado, no usar)
     updated_at          TEXT
 );
 """
+
+# Columnas añadidas despues del esquema original; se migran con ALTER para BDs
+# que ya existian sin ellas (idempotente).
+_PROFILE_EXTRA_COLUMNS: dict[str, str] = {
+    "win_rate_reliable": "INTEGER",
+}
 
 
 @dataclass
@@ -61,6 +73,7 @@ class WalletProfile:
     longshot_wins: int = 0
     funding_cluster_id: str | None = None
     avg_trade_size_usd: float = 0.0
+    win_rate_reliable: bool = True
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -117,6 +130,13 @@ def compute_win_stats(positions: list[dict[str, Any]]) -> dict[str, Any]:
     ~1 o redeemable. Longshot ganado = ganada con precio de entrada (avgPrice)
     por debajo de LONGSHOT_PROB. Devuelve win_rate (None si no hay resueltas),
     n_resolved y longshot_wins.
+
+    OJO CON EL SESGO DE SUPERVIVENCIA: este calculo asume que `positions` es una
+    muestra NO sesgada respecto al resultado. Si las posiciones se pidieron
+    ordenadas por valor actual (CURRENT/DESC) y se truncaron, las perdedoras
+    (valor ~$0) quedan fuera y el win_rate sale inflado (visto en produccion:
+    win_rate 0.99). Pide las posiciones con `sort_by=NEUTRAL_SORT_BY` y, si la
+    lista viene truncada, marca el win_rate como no fiable (ver build_profile).
     """
     n_resolved = 0
     wins = 0
@@ -172,7 +192,14 @@ def _funding(wallet: str) -> tuple[str | None, int | None]:
 def build_profile(wallet: str, max_trades: int | None = 2000) -> WalletProfile:
     """Construye el perfil completo de una wallet (llama a la Data API y Polygonscan)."""
     trades = get_user_trades(wallet, max_trades=max_trades)
-    positions = get_user_positions(wallet, max_positions=500)
+    # Orden NEUTRAL respecto al resultado (no CURRENT/DESC): evita el sesgo de
+    # supervivencia en el win_rate. Tope alto para no truncar wallets activas.
+    positions = get_user_positions(
+        wallet, max_positions=PROFILE_MAX_POSITIONS, sort_by=NEUTRAL_SORT_BY
+    )
+    # Si volvieron TANTAS como el tope, la muestra esta truncada => el win_rate
+    # puede estar sesgado y no debe usarse para puntuar.
+    win_rate_reliable = len(positions) < PROFILE_MAX_POSITIONS
     funder, funding_ts = _funding(wallet)
 
     ts_stats = compute_trade_stats(trades)
@@ -194,20 +221,38 @@ def build_profile(wallet: str, max_trades: int | None = 2000) -> WalletProfile:
         longshot_wins=win_stats["longshot_wins"],
         funding_cluster_id=funder,
         avg_trade_size_usd=ts_stats["avg_trade_size_usd"],
+        win_rate_reliable=win_rate_reliable,
     )
+
+
+def ensure_profiles_schema(conn: sqlite3.Connection) -> None:
+    """Crea la tabla wallet_profiles y migra columnas nuevas (idempotente).
+
+    Las filas que ya existian (perfiladas antes del arreglo del sesgo de
+    supervivencia) se marcan con win_rate_reliable = 0: su win_rate se calculo
+    con la muestra truncada y no es fiable hasta que se reconstruya el perfil.
+    """
+    conn.executescript(WALLET_PROFILES_SCHEMA)
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(wallet_profiles)")}
+    added_reliable = "win_rate_reliable" not in existing
+    for col, decl in _PROFILE_EXTRA_COLUMNS.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE wallet_profiles ADD COLUMN {col} {decl}")
+    if added_reliable:
+        conn.execute("UPDATE wallet_profiles SET win_rate_reliable = 0 WHERE win_rate_reliable IS NULL")
+    conn.commit()
 
 
 def connect(db_path: Any = DB_PATH) -> sqlite3.Connection:
     """Abre el SQLite del proyecto y garantiza la tabla wallet_profiles."""
     conn = db.connect(db_path)
-    conn.executescript(WALLET_PROFILES_SCHEMA)
-    conn.commit()
+    ensure_profiles_schema(conn)
     return conn
 
 
 _PROFILE_COLUMNS = (
     "wallet, wallet_age_days, total_volume_usd, n_markets, concentration, win_rate, "
-    "n_resolved, longshot_wins, funding_cluster_id, avg_trade_size_usd, updated_at"
+    "n_resolved, longshot_wins, funding_cluster_id, avg_trade_size_usd, win_rate_reliable, updated_at"
 )
 
 

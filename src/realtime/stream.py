@@ -38,6 +38,7 @@ from src import db
 from src.analysis.profiles import (
     WalletProfile,
     build_profile,
+    ensure_profiles_schema,
     load_profile,
     load_shared_cluster_ids,
     save_profile,
@@ -436,6 +437,7 @@ class Detector:
         profile = build_profile(wallet)
         conn = db.connect(self.db_path)
         try:
+            ensure_profiles_schema(conn)  # la BD efimera del hilo debe tener el esquema al dia
             save_profile(conn, profile)
         finally:
             conn.close()
@@ -567,8 +569,7 @@ def main() -> None:
     conn = storage.connect()
     # aseguramos tambien las tablas de perfiles y cubos (mismo SQLite)
     from src.analysis.buckets import VOLUME_BUCKETS_SCHEMA
-    from src.analysis.profiles import WALLET_PROFILES_SCHEMA
-    conn.executescript(WALLET_PROFILES_SCHEMA)
+    ensure_profiles_schema(conn)  # crea la tabla y migra columnas nuevas (win_rate_reliable)
     conn.executescript(VOLUME_BUCKETS_SCHEMA)
     conn.commit()
     detector = Detector(conn)
