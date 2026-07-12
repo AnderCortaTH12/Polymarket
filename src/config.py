@@ -48,6 +48,18 @@ INSENSIBILITY_MIN_STREAK: int = 3
 # Score minimo para generar una alerta.
 ALERT_THRESHOLD: int = 50
 
+# Perfilado bajo demanda en el detector (Fase 1). El detector construye el
+# perfil de una wallet EN EL MOMENTO (Data API + Polygonscan) solo si el trade
+# merece la pena: o es grande (>= PROFILING_MIN_TRADE_USD) o ya cumple un tramo
+# de LONGSHOT_TIERS (para no perder entradas tipo "$800 a 0.07"). Los perfiles
+# se cachean y se reconstruyen si superan PROFILE_TTL_HOURS.
+PROFILING_MIN_TRADE_USD: float = 2_500.0
+PROFILE_TTL_HOURS: float = 24.0
+
+# Version del scoring. Las alertas se etiquetan con esto para que el backtest no
+# mezcle alertas puntuadas con perfilado inactivo (v1) con las nuevas (v2).
+SCORING_VERSION: str = "v2"
+
 # Notificaciones por Telegram (ver DESPLIEGUE_VPS.md). El chat_id es el ID
 # privado del usuario; se obtiene tras escribir /start al bot (paso en la doc).
 TELEGRAM_BOT_TOKEN: str = "8780060569:AAHCElYk_wKHvtJ-xaj697C28wvyCbjQLmc"

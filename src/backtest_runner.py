@@ -19,6 +19,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -44,16 +45,35 @@ MAIN_STRATEGIES: tuple[ExitStrategy, ...] = (
 )
 
 
-def load_alerts(min_score: int = 0) -> pd.DataFrame:
-    """Carga todas las alertas de la BD como DataFrame."""
+def load_alerts(min_score: int = 0, scoring_version: str | None = "v2") -> tuple[pd.DataFrame, int]:
+    """Carga las alertas de la BD como DataFrame, filtrando por version del scoring.
+
+    Por defecto solo devuelve las alertas del scoring vigente (v2). Las v1 se
+    puntuaron con el perfilado inactivo (score basura) y mezclarlas invalidaria
+    el backtest. Devuelve (df, n_v1_excluidas) para poder avisar por pantalla.
+    """
     conn = storage.connect(DB_PATH)
     try:
-        return pd.read_sql_query(
+        base = (
             "SELECT id, ts, condition_id, market_question, wallet, side, trade_side, "
             "trade_size_usd, price_at_detection, score_total, score_breakdown, bucket_imbalance "
-            "FROM alerts WHERE score_total >= ? ORDER BY ts ASC",
-            conn, params=(min_score,),
+            "FROM alerts WHERE score_total >= ?"
         )
+        params: tuple[Any, ...] = (min_score,)
+        if scoring_version is not None:
+            # NULL = alertas anteriores a la migracion; se tratan como v1.
+            base += " AND COALESCE(scoring_version, 'v1') = ?"
+            params = (min_score, scoring_version)
+        df = pd.read_sql_query(base + " ORDER BY ts ASC", conn, params=params)
+        excluded = 0
+        if scoring_version is not None:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE score_total >= ? "
+                "AND COALESCE(scoring_version, 'v1') != ?",
+                (min_score, scoring_version),
+            ).fetchone()
+            excluded = int(row[0]) if row else 0
+        return df, excluded
     finally:
         conn.close()
 
@@ -197,11 +217,22 @@ def _conclusions(comparison: pd.DataFrame, by_component: pd.DataFrame, by_tier: 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Backtest cuantitativo de las alertas del detector.")
     parser.add_argument("--min-score", type=int, default=0, help="Solo alertas con score_total >= este valor.")
+    parser.add_argument(
+        "--include-v1", action="store_true",
+        help="Incluir las alertas v1 (scoring con perfilado inactivo). Por defecto se excluyen.",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    alerts = load_alerts(args.min_score)
+    scoring_version = None if args.include_v1 else "v2"
+    alerts, excluded_v1 = load_alerts(args.min_score, scoring_version)
+    if excluded_v1:
+        print(
+            f"[aviso] Excluidas {excluded_v1} alertas v1: se puntuaron con el perfilado "
+            "inactivo (score defectuoso) y contaminarian el backtest. Usa --include-v1 "
+            "para incluirlas (no recomendado)."
+        )
     if alerts.empty:
         print("No hay alertas en la BD (o ninguna supera --min-score). Nada que backtestear.")
         return 0

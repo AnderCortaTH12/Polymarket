@@ -4,6 +4,7 @@ Mockean payloads con la forma real del feed de trades de Polymarket para probar
 el filtro de politica, el fallback name/pseudonym, el valor en $ = size*price y
 el flujo por-trade con SQLite en memoria.
 """
+import asyncio
 import json
 import os
 import tempfile
@@ -12,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from src import config
+from src.analysis.profiles import WalletProfile
 from src.realtime.stream import Detector, display_name, is_politics_trade, send_telegram_alert
 from src.realtime import storage
 from src.analysis import profiles
@@ -38,6 +40,11 @@ def _trade(**over) -> dict:
     }
     base.update(over)
     return base
+
+
+def _run(coro):
+    """Ejecuta una corutina en un event loop efimero (process_trade es async)."""
+    return asyncio.run(coro)
 
 
 def _mem_detector() -> Detector:
@@ -71,10 +78,15 @@ class TestProcessTrade(unittest.TestCase):
         patcher = patch("src.realtime.stream.requests.post")
         self.mock_post = patcher.start()
         self.addCleanup(patcher.stop)
+        # Con el perfilado bajo demanda, un trade grande dispara build_profile (red).
+        # Lo forzamos a fallar => se puntua con perfil None, como antes (tabla vacia).
+        bp = patch("src.realtime.stream.build_profile", side_effect=RuntimeError("sin red"))
+        self.mock_build = bp.start()
+        self.addCleanup(bp.stop)
 
     def test_descarta_no_politica(self) -> None:
         det = _mem_detector()
-        aid = det.process_trade(_trade(conditionId="0xNOPOL"))
+        aid = _run(det.process_trade(_trade(conditionId="0xNOPOL")))
         self.assertIsNone(aid)
         self.assertEqual(det.trades_processed, 0)
 
@@ -82,7 +94,7 @@ class TestProcessTrade(unittest.TestCase):
         det = _mem_detector()
         # wallet sin perfil + trade $6000 longshot => sin_perfil(20)+longshot(20)=40 <50
         # subimos a $12000 (size 120000 * 0.10) => +tamano_anomalo(15) = 55 >=50
-        aid = det.process_trade(_trade(size=120000, price=0.10))
+        aid = _run(det.process_trade(_trade(size=120000, price=0.10)))
         self.assertIsNotNone(aid)
         row = det.conn.execute(
             "SELECT trade_size_usd, username, transaction_hash, side, score_total "
@@ -98,7 +110,7 @@ class TestProcessTrade(unittest.TestCase):
     def test_trade_pequeno_no_alerta(self) -> None:
         det = _mem_detector()
         # trade pequeño, wallet sin perfil => score bajo, sin alerta pero sí procesado
-        aid = det.process_trade(_trade(size=100, price=0.50))
+        aid = _run(det.process_trade(_trade(size=100, price=0.50)))
         self.assertIsNone(aid)
         self.assertEqual(det.trades_processed, 1)
         self.assertEqual(det.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 0)
@@ -106,7 +118,7 @@ class TestProcessTrade(unittest.TestCase):
     @patch.object(config, "TELEGRAM_CHAT_ID", "999")
     def test_alerta_envia_telegram_con_payload(self) -> None:
         det = _mem_detector()
-        aid = det.process_trade(_trade(size=120000, price=0.10))  # score >= 50
+        aid = _run(det.process_trade(_trade(size=120000, price=0.10)))  # score >= 50
         self.assertIsNotNone(aid)
         self.mock_post.assert_called_once()
         args, kwargs = self.mock_post.call_args
@@ -123,25 +135,25 @@ class TestProcessTrade(unittest.TestCase):
     @patch.object(config, "TELEGRAM_CHAT_ID", "999")
     def test_no_alerta_no_envia_telegram(self) -> None:
         det = _mem_detector()
-        det.process_trade(_trade(size=100, price=0.50))  # score bajo
+        _run(det.process_trade(_trade(size=100, price=0.50)))  # score bajo
         self.mock_post.assert_not_called()
 
     @patch.object(config, "TELEGRAM_CHAT_ID", None)
     def test_sin_chat_id_no_envia(self) -> None:
         det = _mem_detector()
-        aid = det.process_trade(_trade(size=120000, price=0.10))  # score >= 50
+        aid = _run(det.process_trade(_trade(size=120000, price=0.10)))  # score >= 50
         self.assertIsNotNone(aid)          # la alerta se guarda igual
         self.mock_post.assert_not_called()  # pero no se envia sin chat_id
 
     def test_process_raw_ignora_no_json(self) -> None:
         det = _mem_detector()
-        det._process_raw("no soy json (ACK)")  # no debe lanzar
-        det._process_raw(json.dumps(_trade(size=120000, price=0.10)))
+        _run(det._process_raw("no soy json (ACK)"))  # no debe lanzar
+        _run(det._process_raw(json.dumps(_trade(size=120000, price=0.10))))
         self.assertEqual(det.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 1)
 
     def test_process_raw_acepta_lista(self) -> None:
         det = _mem_detector()
-        det._process_raw(json.dumps([_trade(size=120000, price=0.10), _trade(conditionId="x")]))
+        _run(det._process_raw(json.dumps([_trade(size=120000, price=0.10), _trade(conditionId="x")])))
         self.assertEqual(det.trades_processed, 1)  # solo el de politica
 
     def test_refresh_context_desde_otro_hilo(self) -> None:
@@ -179,9 +191,87 @@ class TestProcessTrade(unittest.TestCase):
             "connection_id": "abc==", "topic": "activity", "type": "trades",
             "timestamp": 1783000000, "payload": _trade(size=120000, price=0.10),
         }
-        det._process_raw(json.dumps(envelope))
+        _run(det._process_raw(json.dumps(envelope)))
         self.assertEqual(det.trades_processed, 1)
         self.assertEqual(det.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 1)
+
+
+class TestOnDemandProfiling(unittest.TestCase):
+    """Perfilado bajo demanda en el detector (Fase 1)."""
+
+    def setUp(self) -> None:
+        patcher = patch("src.realtime.stream.requests.post")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _det(self) -> Detector:
+        # db_path :memory: => _build_and_save escribe en una BD efimera aparte,
+        # sin tocar la BD real del proyecto.
+        conn = storage.connect(":memory:")
+        conn.executescript(WALLET_PROFILES_SCHEMA)
+        conn.executescript(VOLUME_BUCKETS_SCHEMA)
+        conn.commit()
+        det = Detector(conn, db_path=":memory:")
+        det.politics_conditions = {"0xPOL"}
+        return det
+
+    def test_trade_pequeno_no_perfila(self) -> None:
+        det = self._det()
+        with patch("src.realtime.stream.build_profile") as mock_bp:
+            _run(det.process_trade(_trade(size=100, price=0.50)))  # $50, sin tramo longshot
+        mock_bp.assert_not_called()
+
+    def test_trade_grande_perfila_y_guarda(self) -> None:
+        det = self._det()
+        prof = WalletProfile(wallet="0xWALLET", wallet_age_days=100.0)
+        with patch("src.realtime.stream.build_profile", return_value=prof) as mock_bp, \
+             patch("src.realtime.stream.save_profile") as mock_save:
+            _run(det.process_trade(_trade(size=30000, price=0.50)))  # $15.000 >= 2500
+        mock_bp.assert_called_once_with("0xWALLET")
+        mock_save.assert_called_once()
+        self.assertEqual(det._profile_cache["0xWALLET"][0], prof)
+        self.assertEqual(det._profiled_built, 1)
+
+    def test_caso_maduro_800_a_007_si_perfila(self) -> None:
+        det = self._det()
+        prof = WalletProfile(wallet="0xWALLET")
+        # $800 a 0.07: size = 800/0.07 ~ 11429 shares; < $2500 pero tramo <=0.10.
+        with patch("src.realtime.stream.build_profile", return_value=prof) as mock_bp, \
+             patch("src.realtime.stream.save_profile"):
+            _run(det.process_trade(_trade(size=11429, price=0.07)))
+        mock_bp.assert_called_once()
+
+    def test_cache_dentro_de_ttl_no_reperfila(self) -> None:
+        det = self._det()
+        prof = WalletProfile(wallet="0xWALLET")
+        with patch("src.realtime.stream.build_profile", return_value=prof) as mock_bp, \
+             patch("src.realtime.stream.save_profile"):
+            _run(det.process_trade(_trade(size=30000, price=0.50)))
+            _run(det.process_trade(_trade(size=30000, price=0.50)))
+        mock_bp.assert_called_once()  # el segundo trade sale de cache
+        self.assertEqual(det._profiled_cached, 1)
+
+    def test_perfil_viejo_se_reconstruye(self) -> None:
+        det = self._det()
+        # Perfil en BD pero caducado (updated_at muy antiguo) => hay que reconstruir.
+        det.conn.execute(
+            "INSERT INTO wallet_profiles (wallet, updated_at) VALUES ('0xWALLET', '2000-01-01T00:00:00+00:00')"
+        )
+        det.conn.commit()
+        prof = WalletProfile(wallet="0xWALLET")
+        with patch("src.realtime.stream.build_profile", return_value=prof) as mock_bp, \
+             patch("src.realtime.stream.save_profile"):
+            _run(det.process_trade(_trade(size=30000, price=0.50)))
+        mock_bp.assert_called_once()
+
+    def test_build_profile_falla_no_rompe_y_puntua_sin_perfil(self) -> None:
+        det = self._det()
+        with patch("src.realtime.stream.build_profile", side_effect=RuntimeError("timeout")):
+            # No debe lanzar; puntua con perfil None.
+            _run(det.process_trade(_trade(size=30000, price=0.50)))
+        self.assertEqual(det._profiled_failed, 1)
+        self.assertIsNone(det._profile_cache["0xWALLET"][0])
+        self.assertEqual(det.trades_processed, 1)  # el detector siguio vivo
 
 
 class TestSendTelegram(unittest.TestCase):

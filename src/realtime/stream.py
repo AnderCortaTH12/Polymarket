@@ -35,7 +35,13 @@ from src.analysis.buckets import (
     signed_imbalance,
 )
 from src import db
-from src.analysis.profiles import load_profile, load_shared_cluster_ids
+from src.analysis.profiles import (
+    WalletProfile,
+    build_profile,
+    load_profile,
+    load_shared_cluster_ids,
+    save_profile,
+)
 from src.analysis.scoring import compute_score
 from src.client.gamma import flatten_markets, get_politics_events
 from src.collector.models import DB_PATH
@@ -57,6 +63,13 @@ INACTIVITY_TIMEOUT_S: float = 120.0     # sin mensajes en 2 min => reconectar
 HEARTBEAT_INTERVAL_S: float = 60.0
 REFRESH_INTERVAL_S: float = 600.0       # refrescar set de politica y clusters cada 10 min
 RECONNECT_BACKOFF_MAX_S: float = 30.0
+
+# Perfilado bajo demanda (Fase 1). build_profile hace I/O de red; lo ejecutamos
+# en un hilo con timeout y acotamos la concurrencia con un semaforo para que una
+# rafaga de trades no lance decenas de perfilados a la vez.
+PROFILE_BUILD_TIMEOUT_S: float = 20.0
+PROFILE_BUILD_CONCURRENCY: int = 3
+PROFILE_METRICS_EVERY: int = 50   # loguear metricas de perfilado cada N trades
 
 LOG_DIR: Path = Path(__file__).resolve().parents[2] / "logs"
 LOG_FILE: Path = LOG_DIR / "detector.log"
@@ -144,6 +157,38 @@ def _to_iso(unix_ts: Any) -> str:
         return datetime.now(timezone.utc).isoformat()
 
 
+def _updated_at_epoch(value: Any) -> float | None:
+    """Convierte el `updated_at` ISO de un perfil a epoch (segundos). None si falla."""
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _should_profile(trade: dict[str, Any]) -> bool:
+    """True si merece la pena perfilar la wallet de este trade (filtro barato).
+
+    Perfilamos solo si el trade es grande (>= PROFILING_MIN_TRADE_USD) o si ya
+    cumple un tramo de LONGSHOT_TIERS (precio <= precio_max y valor >= min_usd);
+    esto ultimo captura entradas pequeñas a precio extremo (caso "$800 a 0.07").
+    El resto no va a alertar, asi que no gastamos una llamada de red en ellos.
+    """
+    usd = _trade_usd(trade)
+    if usd >= config.PROFILING_MIN_TRADE_USD:
+        return True
+    try:
+        price = float(trade.get("price"))
+    except (TypeError, ValueError):
+        return False
+    for price_max, min_usd in config.LONGSHOT_TIERS:
+        if price <= price_max:
+            return usd >= min_usd
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # Estado de cubos de volumen en memoria (por mercado)
 # --------------------------------------------------------------------------- #
@@ -215,6 +260,16 @@ class Detector:
         self.trades_processed = 0
         self.ws_connected = False
 
+        # Perfilado bajo demanda: cache en memoria wallet -> (perfil|None, epoch),
+        # TTL en segundos, semaforo para acotar concurrencia y contadores para las
+        # metricas periodicas. El semaforo se crea perezosamente (necesita un loop).
+        self._profile_cache: dict[str, tuple[WalletProfile | None, float]] = {}
+        self._profile_ttl_s: float = config.PROFILE_TTL_HOURS * 3600.0
+        self._profile_sem: asyncio.Semaphore | None = None
+        self._profiled_built = 0      # perfiles construidos con red en esta sesion
+        self._profiled_cached = 0     # resueltos desde cache o BD sin red
+        self._profiled_failed = 0     # perfilados que fallaron/expiraron
+
     # --- estado por-wallet para "insensibilidad al precio" -------------------
     def _update_streak(self, wallet: str, cid: str, trade: dict[str, Any]) -> tuple[int, bool]:
         """Actualiza la racha de mismo-lado de una wallet y si paga peor precio.
@@ -240,11 +295,13 @@ class Detector:
         )
         return st["streak"], price_against
 
-    def process_trade(self, trade: dict[str, Any]) -> int | None:
+    async def process_trade(self, trade: dict[str, Any]) -> int | None:
         """Flujo por trade (pasos 2-7 del diseño). Devuelve alert_id o None.
 
-        No hace llamadas de red: perfil desde SQLite (o None si no existe) y
-        estado de cubos en memoria.
+        A diferencia del diseño original, ahora SI puede tocar la red: si el trade
+        merece la pena (ver `_should_profile`) y no tenemos un perfil fresco, se
+        construye en el momento (en un hilo, sin bloquear el event loop). El resto
+        del flujo (cubos, scoring, alerta) sigue siendo local.
         """
         # 2. Filtro de politica
         if not is_politics_trade(trade, self.politics_conditions):
@@ -254,8 +311,9 @@ class Detector:
         wallet = trade.get("proxyWallet") or ""
         cid = trade.get("conditionId") or ""
 
-        # 3. Perfil (lectura local; None si no visto => scoring conservador)
-        profile = load_profile(self.conn, wallet) if wallet else None
+        # 3. Perfil (bajo demanda: cache -> BD -> build_profile si toca)
+        profile = await self._resolve_profile(wallet, trade)
+        self._maybe_log_profile_metrics()
 
         # 4. Cubo de volumen del mercado (crear si no existe)
         bucket = self._buckets.setdefault(cid, _BucketState(self.bucket_size_usd))
@@ -317,6 +375,81 @@ class Detector:
             })
         return alert_id
 
+    # --- perfilado bajo demanda (con red, en un hilo) -----------------------
+    async def _resolve_profile(
+        self, wallet: str, trade: dict[str, Any]
+    ) -> WalletProfile | None:
+        """Devuelve el perfil de la wallet, construyendolo si hace falta.
+
+        Camino: si el trade no merece perfilado -> lectura local barata (como
+        antes). Si merece -> cache en memoria, luego BD (si esta fresca), y en
+        ultimo caso build_profile() en un hilo (con timeout). Nunca lanza: ante
+        cualquier fallo loguea WARNING y devuelve None (el flujo debe seguir vivo).
+        """
+        if not wallet:
+            return None
+
+        # Trades irrelevantes: lectura local (None si no visto), sin gastar red.
+        if not _should_profile(trade):
+            return load_profile(self.conn, wallet)
+
+        now = time.time()
+        cached = self._profile_cache.get(wallet)
+        if cached is not None and (now - cached[1]) < self._profile_ttl_s:
+            self._profiled_cached += 1
+            return cached[0]
+
+        # Perfil en BD: sirve si es fresco (dentro del TTL); si no, se reconstruye.
+        profile = load_profile(self.conn, wallet)
+        if profile is not None:
+            updated = _updated_at_epoch(profile.updated_at)
+            if updated is not None and (now - updated) < self._profile_ttl_s:
+                self._profile_cache[wallet] = (profile, now)
+                self._profiled_cached += 1
+                return profile
+
+        # Construir en el momento, en un hilo y con timeout, sin tumbar el loop.
+        if self._profile_sem is None:
+            self._profile_sem = asyncio.Semaphore(PROFILE_BUILD_CONCURRENCY)
+        try:
+            async with self._profile_sem:
+                built = await asyncio.wait_for(
+                    asyncio.to_thread(self._build_and_save, wallet),
+                    timeout=PROFILE_BUILD_TIMEOUT_S,
+                )
+            self._profile_cache[wallet] = (built, now)
+            self._profiled_built += 1
+            return built
+        except Exception as exc:  # noqa: BLE001 - un perfil fallido no rompe el detector
+            self._profiled_failed += 1
+            # Cacheamos None para no reintentar en cada trade de la misma wallet.
+            self._profile_cache[wallet] = (None, now)
+            logger.warning("Perfilado de %s fallo (%s); se puntua sin perfil", wallet, exc)
+            return None
+
+    def _build_and_save(self, wallet: str) -> WalletProfile:
+        """Construye y persiste el perfil de una wallet. Corre en un hilo aparte.
+
+        Usa una conexion sqlite efimera propia del hilo (db.connect), NUNCA
+        self.conn, que esta reservada al hilo del event loop.
+        """
+        profile = build_profile(wallet)
+        conn = db.connect(self.db_path)
+        try:
+            save_profile(conn, profile)
+        finally:
+            conn.close()
+        return profile
+
+    def _maybe_log_profile_metrics(self) -> None:
+        """Cada N trades, loguea el estado del perfilado (construidos/cache/fallos)."""
+        if self.trades_processed % PROFILE_METRICS_EVERY == 0:
+            logger.info(
+                "Perfilado: %d construidos, %d de cache/BD, %d fallidos (%d trades, %d en cache)",
+                self._profiled_built, self._profiled_cached, self._profiled_failed,
+                self.trades_processed, len(self._profile_cache),
+            )
+
     # --- refrescos (con red, fuera del camino critico) ----------------------
     def refresh_context(self) -> None:
         """Recarga el set de condition_ids de politica (Gamma) y los clusters (SQLite).
@@ -341,7 +474,7 @@ class Detector:
         except Exception:  # noqa: BLE001 - un fallo de refresco no debe tumbar el servicio
             logger.exception("Fallo refrescando contexto (se reintenta en el proximo ciclo)")
 
-    def _process_raw(self, raw: str) -> None:
+    async def _process_raw(self, raw: str) -> None:
         """Parsea un mensaje del WebSocket. Ignora lo que no sea JSON (ACK/PONG).
 
         Cada mensaje del feed es un sobre `{topic, type, payload, ...}` donde el
@@ -359,7 +492,7 @@ class Detector:
             for t in (trade if isinstance(trade, list) else [trade]):
                 if isinstance(t, dict):
                     try:
-                        self.process_trade(t)
+                        await self.process_trade(t)
                     except Exception:  # noqa: BLE001 - un trade malformado no para el stream
                         logger.exception("Fallo procesando un trade")
 
@@ -403,7 +536,7 @@ class Detector:
                         logger.info("Conectado y suscrito a %s", WS_URL)
                         while True:
                             raw = await asyncio.wait_for(ws.recv(), timeout=INACTIVITY_TIMEOUT_S)
-                            self._process_raw(raw)
+                            await self._process_raw(raw)
                 except Exception as exc:  # noqa: BLE001 - reconectar ante cualquier fallo
                     logger.warning("WebSocket caido (%s). Reconectando en %.0fs", exc, backoff)
                 finally:

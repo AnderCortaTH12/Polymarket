@@ -11,7 +11,7 @@ import logging
 import sqlite3
 from typing import Any
 
-from src import db
+from src import config, db
 from src.analysis.scoring import ScoreBreakdown
 from src.collector.models import DB_PATH
 
@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     username            TEXT,            -- name/pseudonym del trader (Polymarket)
     transaction_hash    TEXT,            -- referencia auditable on-chain
     market_slug         TEXT,            -- para el link a polymarket.com
-    trade_side          TEXT             -- BUY / SELL (el 'side' es el outcome)
+    trade_side          TEXT,            -- BUY / SELL (el 'side' es el outcome)
+    scoring_version     TEXT             -- version del scoring que genero la alerta
 );
 """
 
@@ -44,15 +45,25 @@ _ALERTS_EXTRA_COLUMNS: dict[str, str] = {
     "transaction_hash": "TEXT",
     "market_slug": "TEXT",
     "trade_side": "TEXT",
+    "scoring_version": "TEXT",
 }
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
-    """Añade columnas nuevas a `alerts` si la tabla se creo con un esquema viejo."""
+    """Añade columnas nuevas a `alerts` si la tabla se creo con un esquema viejo.
+
+    Idempotente: solo hace ALTER de las que faltan. Las filas que ya existian se
+    quedan con scoring_version NULL; se marcan como "v1" (perfilado inactivo) para
+    que el backtest pueda excluirlas de las nuevas (v2).
+    """
     existing = {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}
+    added_scoring_version = "scoring_version" not in existing
     for col, decl in _ALERTS_EXTRA_COLUMNS.items():
         if col not in existing:
             conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} {decl}")
+    if added_scoring_version:
+        # Las alertas preexistentes son del scoring defectuoso: etiquetar como v1.
+        conn.execute("UPDATE alerts SET scoring_version = 'v1' WHERE scoring_version IS NULL")
     conn.commit()
 
 
@@ -110,13 +121,13 @@ def save_alert(
     cur = conn.execute(
         "INSERT INTO alerts (ts, condition_id, market_question, wallet, side, "
         "trade_size_usd, price_at_detection, score_total, score_breakdown, bucket_imbalance, "
-        "username, transaction_hash, market_slug, trade_side) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "username, transaction_hash, market_slug, trade_side, scoring_version) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             ts, condition_id, market_question, wallet, side,
             trade_size_usd, price_at_detection, score.score_total,
             json.dumps(score.components()), bucket_imbalance,
-            username, transaction_hash, market_slug, trade_side,
+            username, transaction_hash, market_slug, trade_side, config.SCORING_VERSION,
         ),
     )
     conn.commit()
