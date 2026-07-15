@@ -71,6 +71,17 @@ class TestComputeWinStats(unittest.TestCase):
         self.assertIsNone(s["win_rate"])
         self.assertEqual(s["n_resolved"], 0)
 
+    def test_win_rate_reliable_siempre_false(self) -> None:
+        # Fase 1c: el win_rate no es reconstruible desde /positions, asi que
+        # compute_win_stats lo marca SIEMPRE como no fiable, gane lo que gane.
+        positions = [
+            {"curPrice": 1.0, "avgPrice": 0.20},
+            {"curPrice": 0.99, "avgPrice": 0.60},
+            {"curPrice": 0.0, "avgPrice": 0.40},
+        ]
+        self.assertFalse(compute_win_stats(positions)["win_rate_reliable"])
+        self.assertFalse(compute_win_stats([])["win_rate_reliable"])
+
 
 class TestBuildProfileSurvivorship(unittest.TestCase):
     """El win_rate no debe sufrir sesgo de supervivencia (Fase 1b)."""
@@ -100,12 +111,39 @@ class TestBuildProfileSurvivorship(unittest.TestCase):
             prof = build_profile("0xW")
         self.assertFalse(prof.win_rate_reliable)
 
-    def test_sin_truncamiento_win_rate_fiable(self) -> None:
+    def test_win_rate_nunca_fiable_aunque_no_truncado(self) -> None:
+        # Fase 1c: /positions no ve el historial cerrado, asi que el win_rate es
+        # estructuralmente inservible AUNQUE la muestra no venga truncada.
         positions = [{"curPrice": 1.0, "avgPrice": 0.5}, {"curPrice": 0.0, "avgPrice": 0.5}]
         p_tr, p_pos, p_tk, p_tx = self._patches(positions)
         with p_tr, p_pos, p_tk, p_tx:
             prof = build_profile("0xW")
-        self.assertTrue(prof.win_rate_reliable)
+        self.assertFalse(prof.win_rate_reliable)
+
+    def test_resto_del_perfil_intacto_tras_desactivar_track_record(self) -> None:
+        # Fase 1c solo invalida win_rate; el resto del perfil (edad, volumen,
+        # mercados, concentracion, funder) sale de trades/Polygonscan y debe
+        # seguir calculandose igual. Este test lo fija para que el cambio no
+        # toque nada mas.
+        trades = [
+            {"size": 100, "price": 0.5, "conditionId": "0xA", "timestamp": 1_000_000},
+            {"size": 200, "price": 0.5, "conditionId": "0xB", "timestamp": 2_000_000},
+        ]
+        transfers = [{"from": "0xFUNDER", "timeStamp": "1000000"}]
+        patches = (
+            patch("src.analysis.profiles.get_user_trades", return_value=trades),
+            patch("src.analysis.profiles.get_user_positions", return_value=[]),
+            patch("src.analysis.profiles.get_first_token_transfers", return_value=transfers),
+            patch("src.analysis.profiles.get_first_transactions", return_value=[]),
+        )
+        with patches[0], patches[1], patches[2], patches[3]:
+            prof = build_profile("0xW")
+        self.assertAlmostEqual(prof.total_volume_usd, 100 * 0.5 + 200 * 0.5)
+        self.assertEqual(prof.n_markets, 2)
+        self.assertAlmostEqual(prof.avg_trade_size_usd, 75.0)
+        self.assertGreater(prof.concentration, 0.0)
+        self.assertEqual(prof.funding_cluster_id, "0xFUNDER")
+        self.assertIsNotNone(prof.wallet_age_days)
 
 
 class TestProfilesMigration(unittest.TestCase):

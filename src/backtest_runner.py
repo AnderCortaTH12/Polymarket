@@ -45,12 +45,13 @@ MAIN_STRATEGIES: tuple[ExitStrategy, ...] = (
 )
 
 
-def load_alerts(min_score: int = 0, scoring_version: str | None = "v2") -> tuple[pd.DataFrame, int]:
+def load_alerts(min_score: int = 0, scoring_version: str | None = "v3") -> tuple[pd.DataFrame, int]:
     """Carga las alertas de la BD como DataFrame, filtrando por version del scoring.
 
-    Por defecto solo devuelve las alertas del scoring vigente (v2). Las v1 se
-    puntuaron con el perfilado inactivo (score basura) y mezclarlas invalidaria
-    el backtest. Devuelve (df, n_v1_excluidas) para poder avisar por pantalla.
+    Por defecto solo devuelve las alertas del scoring vigente (v3). Las v1 se
+    puntuaron con el perfilado inactivo y las v2 con track_record activo sobre un
+    win_rate falso (ver Fase 1c); mezclar cualquiera de ellas invalidaria el
+    backtest. Devuelve (df, n_legacy_excluidas) para poder avisar por pantalla.
     """
     conn = storage.connect(DB_PATH)
     try:
@@ -218,19 +219,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Backtest cuantitativo de las alertas del detector.")
     parser.add_argument("--min-score", type=int, default=0, help="Solo alertas con score_total >= este valor.")
     parser.add_argument(
-        "--include-v1", action="store_true",
-        help="Incluir las alertas v1 (scoring con perfilado inactivo). Por defecto se excluyen.",
+        "--include-legacy", "--include-v1", dest="include_legacy", action="store_true",
+        help="Incluir las alertas v1/v2 (scorings antiguos). Por defecto se excluyen.",
     )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    scoring_version = None if args.include_v1 else "v2"
-    alerts, excluded_v1 = load_alerts(args.min_score, scoring_version)
-    if excluded_v1:
+    scoring_version = None if args.include_legacy else "v3"
+    alerts, excluded_legacy = load_alerts(args.min_score, scoring_version)
+    if excluded_legacy:
         print(
-            f"[aviso] Excluidas {excluded_v1} alertas v1: se puntuaron con el perfilado "
-            "inactivo (score defectuoso) y contaminarian el backtest. Usa --include-v1 "
+            f"[aviso] Excluidas {excluded_legacy} alertas v1/v2: se puntuaron con "
+            "scorings antiguos (v1 perfilado inactivo, v2 track_record sobre un "
+            "win_rate falso) y contaminarian el backtest. Usa --include-legacy "
             "para incluirlas (no recomendado)."
         )
     if alerts.empty:

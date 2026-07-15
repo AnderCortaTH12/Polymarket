@@ -103,9 +103,13 @@ def compute_score(
                 break  # solo el tramo mas restrictivo aplicable
 
     # --- Track record sospechoso -------------------------------------------
-    # Solo puntua si el win_rate es FIABLE: si la muestra de posiciones se trunco
-    # (sesgo de supervivencia), sabemos que el win_rate esta inflado y no lo
-    # usamos; es preferible no puntuar a puntuar con un dato sesgado.
+    # DESACTIVADO en la Fase 1c: w["track_record"] == 0, asi que este bloque no
+    # suma puntos aunque el win_rate sea 0.99 con muchas resueltas. El motivo no
+    # es un umbral mal calibrado: la fuente (endpoint /positions) solo devuelve
+    # posiciones vivas, asi que el win_rate esta estructuralmente sesgado (ver
+    # config.SCORE_WEIGHTS y FASE6.md). El campo se conserva (siempre 0) por
+    # compatibilidad de esquema con las alertas guardadas y el backtest.
+    # La guarda de fiabilidad se mantiene por si algun dia se reactiva el peso.
     win_rate = getattr(wallet_profile, "win_rate", None) if wallet_profile else None
     n_resolved = getattr(wallet_profile, "n_resolved", 0) if wallet_profile else 0
     win_rate_reliable = getattr(wallet_profile, "win_rate_reliable", True) if wallet_profile else True

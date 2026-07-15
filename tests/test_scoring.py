@@ -110,17 +110,17 @@ class TestLongshotTiers(unittest.TestCase):
         self.assertEqual(s.longshot, 0)
         self.assertIsNone(s.longshot_tier)
 
-    def test_8_track_record_sospechoso(self) -> None:
-        prof = FakeProfile(wallet_age_days=300, win_rate=0.9, n_resolved=20)
+    def test_8_track_record_desactivado_siempre_cero(self) -> None:
+        # Fase 1c: track_record esta DESACTIVADO (peso 0) porque el win_rate no es
+        # calculable desde /positions. Ni siquiera un win_rate=0.99 con muestra
+        # abundante y marcada como fiable debe puntuar.
+        self.assertEqual(W["track_record"], 0)
+        prof = FakeProfile(wallet_age_days=300, win_rate=0.99, n_resolved=50, win_rate_reliable=True)
         s = compute_score(_trade(), prof, 0.0)
-        self.assertEqual(s.track_record, W["track_record"])
-        # win_rate alto pero pocas resueltas -> no cuenta
-        s2 = compute_score(_trade(), FakeProfile(wallet_age_days=300, win_rate=1.0, n_resolved=3), 0.0)
-        self.assertEqual(s2.track_record, 0)
+        self.assertEqual(s.track_record, 0)
 
     def test_8b_track_record_no_puntua_si_win_rate_no_fiable(self) -> None:
-        # win_rate altisimo y muestra suficiente, pero NO fiable (muestra truncada,
-        # sesgo de supervivencia) => no debe puntuar track_record.
+        # Aunque se reactivara el peso, un win_rate no fiable no debe puntuar.
         prof = FakeProfile(wallet_age_days=300, win_rate=0.99, n_resolved=20, win_rate_reliable=False)
         s = compute_score(_trade(), prof, 0.0)
         self.assertEqual(s.track_record, 0)

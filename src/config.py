@@ -13,7 +13,15 @@ SCORE_WEIGHTS: dict[str, int] = {
     "sin_perfil": 20,             # wallet nunca vista + trade relevante
     "tamano_anomalo": 15,         # trade absoluto muy grande
     "longshot": 20,              # conviccion en un outcome improbable
-    "track_record": 20,          # win-rate sospechosamente alto
+    # track_record DESACTIVADO (peso 0) en la Fase 1c: la fuente del win_rate no
+    # es valida. El endpoint /positions de Polymarket solo devuelve posiciones
+    # VIVAS; todo lo cerrado (ganado y cobrado, o perdido a $0) desaparece, asi
+    # que el win_rate calculado desde ahi mide una urna de la que se han retirado
+    # todas las derrotas (sale ~1.0). No es un bug de parametros: el dato no
+    # existe en la fuente. NO reactivar sin reconstruir antes el win_rate desde
+    # los TRADES cruzados con la resolucion real (ver "Limitacion conocida" en
+    # FASE6.md). El campo se conserva en ScoreBreakdown (siempre 0) por esquema.
+    "track_record": 0,           # DESACTIVADO: win_rate no calculable desde /positions
     "cluster": 10,               # funder compartido con otras wallets
     "concentracion": 10,         # opera casi solo en un mercado
     "flujo_toxico": 15,          # el cubo de volumen empuja fuerte en su direccion
@@ -57,8 +65,10 @@ PROFILING_MIN_TRADE_USD: float = 2_500.0
 PROFILE_TTL_HOURS: float = 24.0
 
 # Version del scoring. Las alertas se etiquetan con esto para que el backtest no
-# mezcle alertas puntuadas con perfilado inactivo (v1) con las nuevas (v2).
-SCORING_VERSION: str = "v2"
+# mezcle scorings incompatibles: v1 (perfilado inactivo), v2 (track_record activo
+# sobre un win_rate falso) y v3 (track_record desactivado, Fase 1c). El backtest y
+# el dashboard filtran a v3 por defecto.
+SCORING_VERSION: str = "v3"
 
 # Notificaciones por Telegram (ver DESPLIEGUE_VPS.md). El chat_id es el ID
 # privado del usuario; se obtiene tras escribir /start al bot (paso en la doc).

@@ -114,7 +114,7 @@ no hardcodeados dispersos por el código.
 | Sin perfil | wallet nunca vista antes (ni perfil) Y trade > $2.500 | +20 |
 | Tamaño anómalo absoluto | trade > $10.000 en un solo mercado | +15 |
 | Longshot con convicción | trade > $2.500 a probabilidad < 0.35 | +20 |
-| Track record sospechoso | win_rate > 0.8 con n_resolved >= 10 | +20 |
+| Track record sospechoso | win_rate > 0.8 con n_resolved >= 10 | ~~+20~~ **0 (DESACTIVADO, ver Limitación conocida)** |
 | Cluster conocido | funding_cluster_id con >1 wallet | +10 |
 | Concentración | concentration > 0.7 con total_volume > $20k | +10 |
 | Flujo tóxico | imbalance del cubo de volumen actual > 0.75 en la misma dirección que el trade **Y** volumen del cubo >= MIN_BUCKET_VOLUME_FOR_TOXICITY_USD | +15 |
@@ -135,6 +135,46 @@ así queda trazado en la alerta por qué no puntuó, no solo que dio 0.
 Umbral inicial de alerta: score >= 50. Guardar el score desglosado por
 componente en la alerta (JSON), no solo el total — sin eso no se puede
 ajustar pesos después.
+
+### Limitación conocida: el win rate NO es calculable desde /positions (Fase 1c)
+
+**El componente `track_record` está DESACTIVADO** (`SCORE_WEIGHTS["track_record"] = 0`
+en `src/config.py`) porque su fuente de datos no es válida.
+
+El endpoint `/positions` de la Data API de Polymarket solo devuelve posiciones
+**vivas**. Todo lo cerrado desaparece: si ganas y cobras, desaparece; si pierdes
+(shares a $0), desaparece. Lo único que queda visible como "resuelto" son las
+ganadoras aún sin cobrar. Verificado empíricamente en producción: la wallet
+`0x81dBf4FCea9F13eA1bDa8fBA2a348024DeD448f0` ha operado en 125 mercados y la API
+devuelve 7 posiciones, todas abiertas (0 ganadoras resueltas, 0 perdedoras): el
+94% del historial no es visible. Por eso el `win_rate` salía ~1.0 aunque no
+hubiera truncamiento: contábamos victorias en una urna de la que se han retirado
+todas las derrotas.
+
+No es un bug parcheable con parámetros (umbrales, `sort_by`, tope de posiciones):
+**el dato no existe en la fuente**. Por eso `compute_win_stats` marca SIEMPRE
+`win_rate_reliable = False`, y el componente no puntúa nunca mientras su peso sea
+0. El campo se conserva en `ScoreBreakdown` (siempre 0) por compatibilidad de
+esquema con las alertas ya guardadas y el backtest.
+
+**Daño acotado:** solo `win_rate`, `n_resolved` y `longshot_wins` salen de
+`/positions`. El resto del perfil (`wallet_age_days`, `total_volume_usd`,
+`n_markets`, `concentration`, `funding_cluster_id`, `avg_trade_size_usd`) viene de
+los trades o de Polygonscan, que son inmutables y siguen siendo fiables. `win_rate`
+y `n_resolved` se siguen guardando como informativos, pero NO deben usarse para
+scoring.
+
+**Vía correcta (trabajo futuro, condicionado a que el backtest demuestre que
+`track_record` aporta valor predictivo):** reconstruir el win rate desde los
+TRADES (inmutables) cruzados con la resolución real de cada mercado (Gamma),
+reconstruyendo la posición neta por mercado. Requeriría una tabla local de
+resoluciones cacheadas (`condition_id -> outcome ganador`), porque una resolución
+no cambia nunca. Solo entonces tendría sentido reactivar el peso.
+
+**Versionado:** la desactivación sube `SCORING_VERSION` a `"v3"`. Las alertas v2
+se puntuaron con `track_record` potencialmente activo sobre este dato falso;
+mezclarlas con las v3 contaminaría el backtest. El backtest y el dashboard filtran
+a v3 por defecto.
 
 IMPORTANTE — problema de tasa base: apuestas grandes y concentradas son
 normales entre traders experimentados. El objetivo NO es minimizar falsos

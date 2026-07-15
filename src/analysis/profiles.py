@@ -129,14 +129,18 @@ def compute_win_stats(positions: list[dict[str, Any]]) -> dict[str, Any]:
     Resuelta = curPrice practicamente 0 o 1 (o redeemable). Ganada = curPrice
     ~1 o redeemable. Longshot ganado = ganada con precio de entrada (avgPrice)
     por debajo de LONGSHOT_PROB. Devuelve win_rate (None si no hay resueltas),
-    n_resolved y longshot_wins.
+    n_resolved, longshot_wins y win_rate_reliable (SIEMPRE False, ver abajo).
 
-    OJO CON EL SESGO DE SUPERVIVENCIA: este calculo asume que `positions` es una
-    muestra NO sesgada respecto al resultado. Si las posiciones se pidieron
-    ordenadas por valor actual (CURRENT/DESC) y se truncaron, las perdedoras
-    (valor ~$0) quedan fuera y el win_rate sale inflado (visto en produccion:
-    win_rate 0.99). Pide las posiciones con `sort_by=NEUTRAL_SORT_BY` y, si la
-    lista viene truncada, marca el win_rate como no fiable (ver build_profile).
+    EL WIN_RATE NO ES RECONSTRUIBLE DESDE /positions (Fase 1c): el endpoint solo
+    devuelve posiciones VIVAS. Todo lo cerrado desaparece: si ganas y cobras,
+    desaparece; si pierdes (shares a $0), desaparece. Lo unico que queda como
+    "resuelto" son las ganadoras aun sin cobrar, asi que el win_rate mide una
+    urna de la que se han retirado todas las derrotas y sale ~1.0. No es un sesgo
+    de truncamiento parcheable con parametros: el dato no existe en la fuente.
+    Por eso win_rate_reliable se devuelve SIEMPRE False; win_rate y n_resolved se
+    siguen calculando como informativos, pero NO deben usarse para scoring. La
+    via correcta seria reconstruir el win_rate desde los TRADES (inmutables)
+    cruzados con la resolucion real de cada mercado (ver FASE6.md).
     """
     n_resolved = 0
     wins = 0
@@ -162,7 +166,14 @@ def compute_win_stats(positions: list[dict[str, Any]]) -> dict[str, Any]:
                 longshot_wins += 1
 
     win_rate = (wins / n_resolved) if n_resolved else None
-    return {"win_rate": win_rate, "n_resolved": n_resolved, "longshot_wins": longshot_wins}
+    # win_rate_reliable SIEMPRE False: la fuente (/positions) no ve el historial
+    # cerrado, asi que el win_rate es estructuralmente inservible (ver docstring).
+    return {
+        "win_rate": win_rate,
+        "n_resolved": n_resolved,
+        "longshot_wins": longshot_wins,
+        "win_rate_reliable": False,
+    }
 
 
 def _age_days_from_ts(unix_ts: int | None, now: float | None = None) -> float | None:
@@ -197,13 +208,13 @@ def build_profile(wallet: str, max_trades: int | None = 2000) -> WalletProfile:
     positions = get_user_positions(
         wallet, max_positions=PROFILE_MAX_POSITIONS, sort_by=NEUTRAL_SORT_BY
     )
-    # Si volvieron TANTAS como el tope, la muestra esta truncada => el win_rate
-    # puede estar sesgado y no debe usarse para puntuar.
-    win_rate_reliable = len(positions) < PROFILE_MAX_POSITIONS
     funder, funding_ts = _funding(wallet)
 
     ts_stats = compute_trade_stats(trades)
     win_stats = compute_win_stats(positions)
+    # win_rate NO es fiable (Fase 1c): /positions no ve el historial cerrado, asi
+    # que el dato es estructuralmente inservible con independencia del truncado.
+    win_rate_reliable = win_stats["win_rate_reliable"]
 
     # Edad = por la tx de funding; si no hay, por el trade mas antiguo visto.
     age = _age_days_from_ts(funding_ts)
