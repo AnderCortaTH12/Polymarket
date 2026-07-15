@@ -173,9 +173,11 @@ def _should_profile(trade: dict[str, Any]) -> bool:
     """True si merece la pena perfilar la wallet de este trade (filtro barato).
 
     Perfilamos solo si el trade es grande (>= PROFILING_MIN_TRADE_USD) o si ya
-    cumple un tramo de LONGSHOT_TIERS (precio <= precio_max y valor >= min_usd);
-    esto ultimo captura entradas pequeñas a precio extremo (caso "$800 a 0.07").
-    El resto no va a alertar, asi que no gastamos una llamada de red en ellos.
+    cumple su suelo de relevancia (config.relevance_floor, misma tabla que el
+    veto y el longshot); esto ultimo captura entradas pequeñas a precio extremo
+    (caso "$800 a 0.07"). El resto no va a alertar, asi que no gastamos una
+    llamada de red en ellos. (Nota: los trades que no alcanzan el suelo ya se
+    vetan antes en process_trade; esto es una guarda adicional coherente.)
     """
     usd = _trade_usd(trade)
     if usd >= config.PROFILING_MIN_TRADE_USD:
@@ -184,10 +186,7 @@ def _should_profile(trade: dict[str, Any]) -> bool:
         price = float(trade.get("price"))
     except (TypeError, ValueError):
         return False
-    for price_max, min_usd in config.LONGSHOT_TIERS:
-        if price <= price_max:
-            return usd >= min_usd
-    return False
+    return usd >= config.relevance_floor(price)
 
 
 # --------------------------------------------------------------------------- #
@@ -259,6 +258,7 @@ class Detector:
         self._buckets: dict[str, _BucketState] = {}
         self._streaks: dict[tuple[str, str], dict[str, Any]] = {}
         self.trades_processed = 0
+        self.vetoed_by_size = 0   # Fase 2: trades descartados por no alcanzar el suelo de relevancia
         self.ws_connected = False
 
         # Perfilado bajo demanda: cache en memoria wallet -> (perfil|None, epoch),
@@ -308,6 +308,20 @@ class Detector:
         if not is_politics_trade(trade, self.politics_conditions):
             return None
         self.trades_processed += 1
+
+        # 2b. VETO de relevancia economica (Fase 2). Portero ANTES de perfilar y
+        # puntuar: si el trade no alcanza el suelo de relevancia para su precio,
+        # se descarta sin gastar red ni generar alerta, pase lo que pase su score
+        # potencial. El suelo escala con el precio (config.relevance_floor): $800
+        # a 0.07 pasa (suelo 500), $2.000 a 0.50 no (suelo 3.000).
+        trade_usd = _trade_usd(trade)
+        try:
+            veto_price = float(trade.get("price"))
+        except (TypeError, ValueError):
+            veto_price = None
+        if trade_usd < config.relevance_floor(veto_price):
+            self.vetoed_by_size += 1
+            return None
 
         wallet = trade.get("proxyWallet") or ""
         cid = trade.get("conditionId") or ""
@@ -447,9 +461,10 @@ class Detector:
         """Cada N trades, loguea el estado del perfilado (construidos/cache/fallos)."""
         if self.trades_processed % PROFILE_METRICS_EVERY == 0:
             logger.info(
-                "Perfilado: %d construidos, %d de cache/BD, %d fallidos (%d trades, %d en cache)",
+                "Perfilado: %d construidos, %d de cache/BD, %d fallidos, "
+                "%d vetados_por_tamaño (%d trades, %d en cache)",
                 self._profiled_built, self._profiled_cached, self._profiled_failed,
-                self.trades_processed, len(self._profile_cache),
+                self.vetoed_by_size, self.trades_processed, len(self._profile_cache),
             )
 
     # --- refrescos (con red, fuera del camino critico) ----------------------
@@ -566,6 +581,11 @@ def configure_logging() -> None:
 def main() -> None:
     """Arranca el detector."""
     configure_logging()
+    # Dejar en el journal que umbrales de relevancia estaban vigentes (Fase 2).
+    logger.info(
+        "Scoring %s | veto de relevancia RELEVANCE_TIERS=%s | umbral alerta=%d",
+        config.SCORING_VERSION, config.RELEVANCE_TIERS, config.ALERT_THRESHOLD,
+    )
     conn = storage.connect()
     # aseguramos tambien las tablas de perfiles y cubos (mismo SQLite)
     from src.analysis.buckets import VOLUME_BUCKETS_SCHEMA

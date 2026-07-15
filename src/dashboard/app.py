@@ -526,23 +526,23 @@ def render_alerts() -> None:
     c1, c2, c3 = st.columns([1, 2, 1])
     min_score = c1.slider("Score mínimo", 0, 100, 0, step=5)
     query = c2.text_input("Buscar mercado (título)", "")
-    solo_v3 = c3.checkbox("Solo v3", value=True,
-                          help="Ocultar las alertas v1/v2 (scorings antiguos, no comparables).")
+    solo_v4 = c3.checkbox("Solo v4", value=True,
+                          help="Ocultar las alertas v1/v2/v3 (scorings antiguos, no comparables).")
 
     alerts = load_alerts(min_score, ALERTS_LIMIT)
     if not alerts.empty and query:
         alerts = alerts[alerts["market_question"].fillna("").str.contains(query, case=False)]
 
-    n_legacy = int((alerts["scoring_version"] != "v3").sum()) if not alerts.empty else 0
-    if solo_v3 and not alerts.empty:
-        alerts = alerts[alerts["scoring_version"] == "v3"]
+    n_legacy = int((alerts["scoring_version"] != "v4").sum()) if not alerts.empty else 0
+    if solo_v4 and not alerts.empty:
+        alerts = alerts[alerts["scoring_version"] == "v4"]
     if n_legacy:
         st.warning(
-            f"{n_legacy} alertas son **v1/v2**: scorings antiguos y no comparables "
-            "(v1 con el perfilado inactivo; v2 con track_record activo sobre un "
-            "win_rate falso, ver Fase 1c). Su score no es fiable; no las "
-            "interpretes ni las mezcles con las v3."
-            + ("" if solo_v3 else " Están visibles porque desmarcaste «Solo v3».")
+            f"{n_legacy} alertas son **v1/v2/v3**: scorings antiguos y no comparables "
+            "(v1 perfilado inactivo; v2 track_record sobre un win_rate falso; v3 sin "
+            "el veto de relevancia de la Fase 2, que cambia qué genera alerta). No "
+            "las interpretes ni las mezcles con las v4."
+            + ("" if solo_v4 else " Están visibles porque desmarcaste «Solo v4».")
         )
 
     if alerts.empty:

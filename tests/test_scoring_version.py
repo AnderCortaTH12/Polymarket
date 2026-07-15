@@ -73,12 +73,12 @@ class TestScoringVersionMigration(unittest.TestCase):
         )
         version = conn.execute("SELECT scoring_version FROM alerts WHERE id=?", (aid,)).fetchone()[0]
         self.assertEqual(version, config.SCORING_VERSION)
-        self.assertEqual(version, "v3")
+        self.assertEqual(version, "v4")
         conn.close()
 
 
 class TestBacktestExcludesLegacy(unittest.TestCase):
-    def test_load_alerts_excluye_v1_y_v2_por_defecto(self) -> None:
+    def test_load_alerts_excluye_v1_v2_v3_por_defecto(self) -> None:
         from src import backtest_runner
 
         with tempfile.TemporaryDirectory() as d:
@@ -96,9 +96,13 @@ class TestBacktestExcludesLegacy(unittest.TestCase):
                 "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
                 "VALUES ('2026-01-03T00:00:00+00:00', 65, 0.5, 'v3')"
             )
+            conn.execute(
+                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
+                "VALUES ('2026-01-04T00:00:00+00:00', 68, 0.5, 'v4')"
+            )
             conn.execute(  # NULL cuenta como legacy (v1)
                 "INSERT INTO alerts (ts, score_total, price_at_detection) "
-                "VALUES ('2026-01-04T00:00:00+00:00', 70, 0.5)"
+                "VALUES ('2026-01-05T00:00:00+00:00', 70, 0.5)"
             )
             conn.commit()
             conn.close()
@@ -106,12 +110,12 @@ class TestBacktestExcludesLegacy(unittest.TestCase):
             with unittest.mock.patch.object(backtest_runner, "DB_PATH", path):
                 df, excluded = backtest_runner.load_alerts()
             self.assertEqual(len(df), 1)
-            self.assertEqual(int(df.iloc[0]["score_total"]), 65)  # solo la v3
-            self.assertEqual(excluded, 3)  # v1, v2 y la NULL
+            self.assertEqual(int(df.iloc[0]["score_total"]), 68)  # solo la v4
+            self.assertEqual(excluded, 4)  # v1, v2, v3 y la NULL
 
             with unittest.mock.patch.object(backtest_runner, "DB_PATH", path):
                 df_all, excluded_all = backtest_runner.load_alerts(scoring_version=None)
-            self.assertEqual(len(df_all), 4)
+            self.assertEqual(len(df_all), 5)
             self.assertEqual(excluded_all, 0)
 
 

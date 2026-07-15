@@ -92,10 +92,12 @@ def compute_score(
         b.tamano_anomalo = w["tamano_anomalo"]
 
     # --- Longshot con conviccion (comprar un outcome improbable) ------------
-    # El minimo en $ escala con lo extremo del precio (config.LONGSHOT_TIERS):
-    # se aplica el primer tramo cuyo precio_maximo cubra el precio del trade.
-    if side == "BUY" and price is not None:
-        for price_max, min_usd in config.LONGSHOT_TIERS:
+    # El minimo en $ escala con lo extremo del precio (config.RELEVANCE_TIERS, la
+    # MISMA tabla del veto): se aplica el primer tramo cuyo precio_maximo cubra el
+    # precio. Solo para precios longshot (<= LONGSHOT_MAX_PRICE); por encima el
+    # tramo existe para el veto, no para puntuar conviccion en un outcome probable.
+    if side == "BUY" and price is not None and price <= config.LONGSHOT_MAX_PRICE:
+        for price_max, min_usd in config.RELEVANCE_TIERS:
             if price <= price_max:
                 if trade_usd >= min_usd:
                     b.longshot = w["longshot"]

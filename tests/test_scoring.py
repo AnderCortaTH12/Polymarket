@@ -69,6 +69,34 @@ class TestComputeScore(unittest.TestCase):
         self.assertEqual(s2.longshot, 0)
 
 
+class TestRelevanceFloor(unittest.TestCase):
+    """Fase 2: relevance_floor devuelve el suelo del tramo correcto por precio."""
+
+    def test_bordes_de_tramo(self) -> None:
+        self.assertEqual(config.relevance_floor(0.05), 500.0)
+        self.assertEqual(config.relevance_floor(0.10), 500.0)    # borde inferior inclusivo
+        self.assertEqual(config.relevance_floor(0.101), 1500.0)  # justo por encima
+        self.assertEqual(config.relevance_floor(0.20), 1500.0)
+        self.assertEqual(config.relevance_floor(0.35), 1500.0)
+        self.assertEqual(config.relevance_floor(0.351), 3000.0)  # sale del tramo longshot
+        self.assertEqual(config.relevance_floor(0.50), 3000.0)
+        self.assertEqual(config.relevance_floor(0.99), 3000.0)
+
+    def test_precio_none_usa_el_tramo_mas_exigente(self) -> None:
+        self.assertEqual(config.relevance_floor(None), 3000.0)
+
+    def test_veto_y_longshot_comparten_suelo(self) -> None:
+        # El mismo suelo gobierna veto y longshot: en 0.30, ambos usan $1.500.
+        floor = config.relevance_floor(0.30)
+        self.assertEqual(floor, 1500.0)
+        below = compute_score(_trade(size=(floor - 1) / 0.30, price=0.30),
+                              FakeProfile(wallet_age_days=300), 0.0)
+        atfloor = compute_score(_trade(size=floor / 0.30, price=0.30),
+                               FakeProfile(wallet_age_days=300), 0.0)
+        self.assertEqual(below.longshot, 0)
+        self.assertEqual(atfloor.longshot, W["longshot"])
+
+
 class TestLongshotTiers(unittest.TestCase):
     """El minimo en $ del longshot escala con lo extremo del precio."""
 
@@ -84,7 +112,7 @@ class TestLongshotTiers(unittest.TestCase):
         self.assertEqual(s.longshot_tier, 0.10)
 
     def test_600_a_015_no_puntua(self) -> None:
-        # tramo 0.20 exige $1.200
+        # tramo 0.20 exige $1.500 (RELEVANCE_TIERS)
         s = self._score(600, 0.15)
         self.assertEqual(s.longshot, 0)
         self.assertIsNone(s.longshot_tier)
@@ -104,11 +132,18 @@ class TestLongshotTiers(unittest.TestCase):
         self.assertEqual(s.longshot, 0)
         self.assertIsNone(s.longshot_tier)
 
-    def test_2000_a_030_no_llega_al_minimo(self) -> None:
-        # tramo 0.35 exige $2.500; $2.000 no llega
-        s = self._score(2000, 0.30)
+    def test_1000_a_030_no_llega_al_minimo(self) -> None:
+        # tramo 0.35 exige $1.500 (RELEVANCE_TIERS); $1.000 no llega
+        s = self._score(1000, 0.30)
         self.assertEqual(s.longshot, 0)
         self.assertIsNone(s.longshot_tier)
+
+    def test_1800_a_030_puntua_mismo_suelo_que_veto(self) -> None:
+        # $1.800 a 0.30 supera el suelo $1.500: longshot puntua (mismo suelo que
+        # el veto, no pueden contradecirse).
+        s = self._score(1800, 0.30)
+        self.assertEqual(s.longshot, W["longshot"])
+        self.assertEqual(s.longshot_tier, 0.35)
 
     def test_8_track_record_desactivado_siempre_cero(self) -> None:
         # Fase 1c: track_record esta DESACTIVADO (peso 0) porque el win_rate no es

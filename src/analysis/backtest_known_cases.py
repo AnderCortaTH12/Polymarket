@@ -355,7 +355,7 @@ def build_report(query: str = DEFAULT_MADURO_QUERY, candidates: int = DEFAULT_CA
         "por debajo del umbral 50."
     )
     lines.append(
-        "DESPUES (LONGSHOT_TIERS: $500 a precio <=0.10, $1.200 a <=0.20, $2.500 a <=0.35): las "
+        "DESPUES (RELEVANCE_TIERS: $500 a precio <=0.10, $1.500 a <=0.20 y <=0.35): las "
         "compras de YES a precio extremo (0.06-0.09) por ~$800 ya activan longshot (+20), que es la "
         "señal correcta (conviccion en payout). Sumado a la freshness cuando la wallet es nueva, el "
         "score sube claramente frente al escenario anterior."

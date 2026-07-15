@@ -274,6 +274,79 @@ class TestOnDemandProfiling(unittest.TestCase):
         self.assertEqual(det.trades_processed, 1)  # el detector siguio vivo
 
 
+class TestRelevanceVeto(unittest.TestCase):
+    """Fase 2: veto de relevancia economica escalonado por precio (portero)."""
+
+    def setUp(self) -> None:
+        patcher = patch("src.realtime.stream.requests.post")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Los trades que PASAN el veto disparan perfilado (red); lo forzamos a
+        # fallar para no tocar la red (se puntua con perfil None, nos vale).
+        bp = patch("src.realtime.stream.build_profile", side_effect=RuntimeError("sin red"))
+        bp.start()
+        self.addCleanup(bp.stop)
+
+    def _det(self) -> Detector:
+        conn = storage.connect(":memory:")
+        conn.executescript(WALLET_PROFILES_SCHEMA)
+        conn.executescript(VOLUME_BUCKETS_SCHEMA)
+        conn.commit()
+        det = Detector(conn, db_path=":memory:")
+        det.politics_conditions = {"0xPOL"}
+        return det
+
+    def test_micro_trade_vetado_aunque_score_potencial_alto(self) -> None:
+        # $0.30 a 0.009: size = 0.30/0.009 ~ 33 shares. Wallet muy fresca (score
+        # potencial >= 50 por freshness), pero el veto lo descarta antes de puntuar.
+        det = self._det()
+        prof = WalletProfile(wallet="0xWALLET", wallet_age_days=0.5)
+        det.conn.execute(
+            "INSERT INTO wallet_profiles (wallet, wallet_age_days, updated_at) "
+            "VALUES ('0xWALLET', 0.5, ?)",
+            (__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),),
+        )
+        det.conn.commit()
+        with patch("src.realtime.stream.build_profile", return_value=prof) as mock_bp:
+            aid = _run(det.process_trade(_trade(size=0.30 / 0.009, price=0.009)))
+        self.assertIsNone(aid)
+        self.assertEqual(det.vetoed_by_size, 1)
+        self.assertEqual(det.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 0)
+        # Veto ANTES del perfilado: no debe gastar red construyendo perfil.
+        mock_bp.assert_not_called()
+
+    def test_veto_ocurre_antes_del_perfilado(self) -> None:
+        det = self._det()
+        with patch("src.realtime.stream.build_profile") as mock_bp:
+            _run(det.process_trade(_trade(size=2000 / 0.50, price=0.50)))  # $2.000 @ 0.50, suelo 3.000
+        mock_bp.assert_not_called()
+        self.assertEqual(det.vetoed_by_size, 1)
+
+    def test_maduro_800_a_007_pasa_el_veto(self) -> None:
+        det = self._det()
+        aid = _run(det.process_trade(_trade(size=800 / 0.07, price=0.07)))  # suelo 500
+        # No vetado (puede o no alertar, pero el veto no lo descarta).
+        self.assertEqual(det.vetoed_by_size, 0)
+        self.assertEqual(det.trades_processed, 1)
+        del aid
+
+    def test_1800_a_030_pasa_el_veto(self) -> None:
+        det = self._det()
+        _run(det.process_trade(_trade(size=1800 / 0.30, price=0.30)))  # suelo 1.500
+        self.assertEqual(det.vetoed_by_size, 0)
+
+    def test_2000_a_050_vetado(self) -> None:
+        det = self._det()
+        aid = _run(det.process_trade(_trade(size=2000 / 0.50, price=0.50)))  # suelo 3.000
+        self.assertIsNone(aid)
+        self.assertEqual(det.vetoed_by_size, 1)
+
+    def test_5000_a_050_pasa_el_veto(self) -> None:
+        det = self._det()
+        _run(det.process_trade(_trade(size=5000 / 0.50, price=0.50)))  # suelo 3.000, $5.000 pasa
+        self.assertEqual(det.vetoed_by_size, 0)
+
+
 class TestSendTelegram(unittest.TestCase):
     @patch.object(config, "TELEGRAM_CHAT_ID", "12345")
     @patch("src.realtime.stream.requests.post")

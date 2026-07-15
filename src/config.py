@@ -33,15 +33,42 @@ FRESH_WALLET_DAYS: float = 7.0
 VERY_FRESH_WALLET_DAYS: float = 2.0
 NO_PROFILE_MIN_TRADE_USD: float = 2_500.0
 BIG_TRADE_USD: float = 10_000.0
-# Longshot por tramos: un ticket pequeño a precio extremo es una conviccion
-# grande en payout ($800 a 0.07 = ~11.400 shares), asi que el minimo en $ escala
-# con lo extremo del precio. (precio_maximo, minimo_usd): se aplica el PRIMER
-# tramo cuyo precio_maximo >= precio del trade. Precio > 0.35 => no aplica.
-LONGSHOT_TIERS: list[tuple[float, float]] = [
-    (0.10, 500.0),    # precio extremo: basta $500
-    (0.20, 1_200.0),  # precio muy bajo: $1.200
-    (0.35, 2_500.0),  # resto: el umbral original
+# Tramos de RELEVANCIA ECONOMICA por precio. UNA SOLA tabla, dos usos (Fase 2):
+#   a) el VETO de relevancia (portero): si trade_usd < suelo del tramo, el trade
+#      NO se puntua ni puede generar alerta (ver relevance_floor y stream.py).
+#   b) el componente `longshot` del score (solo para price <= 0.35): puntua si
+#      trade_usd >= suelo de su tramo.
+# Derivar ambos de esta misma tabla evita que veto y longshot se contradigan.
+# (precio_maximo, minimo_usd): se aplica el PRIMER tramo cuyo precio_maximo >=
+# precio del trade. El ultimo tramo (1.01) cubre cualquier precio > 0.35.
+# Racional: un ticket pequeño a precio extremo es alta conviccion en payout
+# ($800 a 0.07 = ~11.400 shares); a precio 0.50 el mismo importe es ruido.
+RELEVANCE_TIERS: list[tuple[float, float]] = [
+    (0.10, 500.0),    # precio <= 0.10 -> minimo $500 (caso Maduro: $800 a 0.07)
+    (0.20, 1_500.0),  # precio <= 0.20 -> minimo $1.500
+    (0.35, 1_500.0),  # precio <= 0.35 -> minimo $1.500
+    (1.01, 3_000.0),  # precio > 0.35  -> minimo $3.000 (1.01 cubre todo)
 ]
+
+# Precio maximo para el que el componente `longshot` puede puntuar. Los tramos
+# de RELEVANCE_TIERS por encima de esto solo sirven para el veto, no para longshot.
+LONGSHOT_MAX_PRICE: float = 0.35
+
+
+def relevance_floor(price: float | None) -> float:
+    """Suelo de relevancia economica ($) para un trade a este precio.
+
+    Devuelve el min_usd del PRIMER tramo de RELEVANCE_TIERS cuyo precio_maximo
+    cubre `price`. De aqui salen TANTO el veto (trade_usd < suelo -> descartar)
+    COMO el componente longshot (trade_usd >= suelo del tramo, si price <= 0.35).
+    Si el precio es None o invalido, se usa el tramo mas alto (el mas exigente).
+    """
+    if price is None:
+        return RELEVANCE_TIERS[-1][1]
+    for price_max, min_usd in RELEVANCE_TIERS:
+        if price <= price_max:
+            return min_usd
+    return RELEVANCE_TIERS[-1][1]
 SUSPICIOUS_WIN_RATE: float = 0.8
 MIN_RESOLVED_FOR_WINRATE: int = 10
 CONCENTRATION_MIN: float = 0.7
@@ -66,9 +93,10 @@ PROFILE_TTL_HOURS: float = 24.0
 
 # Version del scoring. Las alertas se etiquetan con esto para que el backtest no
 # mezcle scorings incompatibles: v1 (perfilado inactivo), v2 (track_record activo
-# sobre un win_rate falso) y v3 (track_record desactivado, Fase 1c). El backtest y
-# el dashboard filtran a v3 por defecto.
-SCORING_VERSION: str = "v3"
+# sobre un win_rate falso), v3 (track_record desactivado, Fase 1c) y v4 (veto de
+# relevancia economica escalonado por precio, Fase 2: cambia QUE genera alerta).
+# El backtest y el dashboard filtran a v4 por defecto.
+SCORING_VERSION: str = "v4"
 
 # Notificaciones por Telegram (ver DESPLIEGUE_VPS.md). El chat_id es el ID
 # privado del usuario; se obtiene tras escribir /start al bot (paso en la doc).
