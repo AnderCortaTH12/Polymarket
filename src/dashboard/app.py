@@ -136,7 +136,8 @@ def load_alerts(min_score: int, limit: int) -> pd.DataFrame:
         df = pd.read_sql_query(
             "SELECT id, ts, market_question, market_slug, condition_id, wallet, username, "
             "side, trade_side, trade_size_usd, price_at_detection, score_total, "
-            "score_breakdown, transaction_hash, "
+            "score_breakdown, transaction_hash, score_bruto, techo_evaluable, "
+            "componentes_evaluables, "
             "COALESCE(scoring_version, 'v1') AS scoring_version FROM alerts "
             "WHERE score_total >= ? ORDER BY ts DESC LIMIT ?",
             conn, params=(min_score, limit),
@@ -488,7 +489,18 @@ def _render_detector_status() -> None:
 
 def _render_breakdown(row: dict[str, Any]) -> None:
     """Muestra el score_breakdown (JSON) de una alerta, componente por componente."""
-    st.markdown(f"**Desglose del score — total {int(row.get('score_total') or 0)}**")
+    normalizado = int(row.get("score_total") or 0)
+    bruto = row.get("score_bruto")
+    techo = row.get("techo_evaluable")
+    if bruto is not None and techo is not None and not pd.isna(bruto) and not pd.isna(techo):
+        # Fase 2: el score principal es el NORMALIZADO (%); mostramos bruto/techo.
+        st.markdown(
+            f"**Score {normalizado}%** &nbsp; (bruto {int(bruto)} / techo {int(techo)} "
+            "de componentes evaluables)"
+        )
+    else:
+        # Alertas antiguas (v1-v4) sin normalizacion: solo el total bruto.
+        st.markdown(f"**Desglose del score — total {normalizado}**")
     try:
         breakdown = json.loads(row.get("score_breakdown") or "{}")
     except (json.JSONDecodeError, TypeError):
@@ -526,23 +538,23 @@ def render_alerts() -> None:
     c1, c2, c3 = st.columns([1, 2, 1])
     min_score = c1.slider("Score mínimo", 0, 100, 0, step=5)
     query = c2.text_input("Buscar mercado (título)", "")
-    solo_v4 = c3.checkbox("Solo v4", value=True,
-                          help="Ocultar las alertas v1/v2/v3 (scorings antiguos, no comparables).")
+    solo_v5 = c3.checkbox("Solo v5", value=True,
+                          help="Ocultar las alertas v1-v4 (scorings antiguos, no comparables).")
 
     alerts = load_alerts(min_score, ALERTS_LIMIT)
     if not alerts.empty and query:
         alerts = alerts[alerts["market_question"].fillna("").str.contains(query, case=False)]
 
-    n_legacy = int((alerts["scoring_version"] != "v4").sum()) if not alerts.empty else 0
-    if solo_v4 and not alerts.empty:
-        alerts = alerts[alerts["scoring_version"] == "v4"]
+    n_legacy = int((alerts["scoring_version"] != "v5").sum()) if not alerts.empty else 0
+    if solo_v5 and not alerts.empty:
+        alerts = alerts[alerts["scoring_version"] == "v5"]
     if n_legacy:
         st.warning(
-            f"{n_legacy} alertas son **v1/v2/v3**: scorings antiguos y no comparables "
+            f"{n_legacy} alertas son **v1-v4**: scorings antiguos y no comparables "
             "(v1 perfilado inactivo; v2 track_record sobre un win_rate falso; v3 sin "
-            "el veto de relevancia de la Fase 2, que cambia qué genera alerta). No "
-            "las interpretes ni las mezcles con las v4."
-            + ("" if solo_v4 else " Están visibles porque desmarcaste «Solo v4».")
+            "veto de relevancia; v4 con el score SIN normalizar). El score v5 es un "
+            "porcentaje 0-100 normalizado; no lo mezcles con los brutos anteriores."
+            + ("" if solo_v5 else " Están visibles porque desmarcaste «Solo v5».")
         )
 
     if alerts.empty:
@@ -567,7 +579,7 @@ def render_alerts() -> None:
         "Usuario": alerts["username"],
         "Lado": alerts.apply(_lado, axis=1),
         "Tamaño ($)": pd.to_numeric(alerts["trade_size_usd"], errors="coerce"),
-        "Score": pd.to_numeric(alerts["score_total"], errors="coerce"),
+        "Score %": pd.to_numeric(alerts["score_total"], errors="coerce"),
         "Versión": alerts["scoring_version"],
         "P&L": alerts.apply(_pnl, axis=1),
     })
@@ -591,7 +603,7 @@ def render_alerts() -> None:
         column_config={
             "Fecha": st.column_config.DatetimeColumn(format="YYYY-MM-DD HH:mm"),
             "Tamaño ($)": st.column_config.NumberColumn(format="$%.0f"),
-            "Score": st.column_config.NumberColumn(format="%d"),
+            "Score %": st.column_config.NumberColumn(format="%d"),
         },
     )
 

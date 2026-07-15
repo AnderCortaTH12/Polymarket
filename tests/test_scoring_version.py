@@ -73,12 +73,36 @@ class TestScoringVersionMigration(unittest.TestCase):
         )
         version = conn.execute("SELECT scoring_version FROM alerts WHERE id=?", (aid,)).fetchone()[0]
         self.assertEqual(version, config.SCORING_VERSION)
-        self.assertEqual(version, "v4")
+        self.assertEqual(version, "v5")
+        conn.close()
+
+    def test_save_alert_guarda_los_cuatro_campos_de_normalizacion(self) -> None:
+        conn = storage.connect(":memory:")
+        score = ScoreBreakdown(
+            tamano_anomalo=15, flujo_toxico=15, score_bruto=30, techo_evaluable=75,
+            score_normalizado=40, componentes_evaluables=["wallet_fresca", "tamano_anomalo",
+                                                           "concentracion", "flujo_toxico"],
+            score_total=40,
+        )
+        aid = storage.save_alert(
+            conn, ts="2026-07-01T00:00:00+00:00", condition_id="0xC", market_question="M",
+            wallet="0xW", side="Yes", trade_size_usd=12000.0, price_at_detection=0.5, score=score,
+        )
+        row = conn.execute(
+            "SELECT score_total, score_bruto, techo_evaluable, componentes_evaluables, "
+            "scoring_version FROM alerts WHERE id=?", (aid,)
+        ).fetchone()
+        self.assertEqual(row[0], 40)   # score_total = normalizado
+        self.assertEqual(row[1], 30)   # bruto
+        self.assertEqual(row[2], 75)   # techo
+        self.assertEqual(__import__("json").loads(row[3]),
+                         ["wallet_fresca", "tamano_anomalo", "concentracion", "flujo_toxico"])
+        self.assertEqual(row[4], "v5")
         conn.close()
 
 
 class TestBacktestExcludesLegacy(unittest.TestCase):
-    def test_load_alerts_excluye_v1_v2_v3_por_defecto(self) -> None:
+    def test_load_alerts_excluye_v1_a_v4_por_defecto(self) -> None:
         from src import backtest_runner
 
         with tempfile.TemporaryDirectory() as d:
@@ -100,9 +124,13 @@ class TestBacktestExcludesLegacy(unittest.TestCase):
                 "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
                 "VALUES ('2026-01-04T00:00:00+00:00', 68, 0.5, 'v4')"
             )
+            conn.execute(
+                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
+                "VALUES ('2026-01-05T00:00:00+00:00', 72, 0.5, 'v5')"
+            )
             conn.execute(  # NULL cuenta como legacy (v1)
                 "INSERT INTO alerts (ts, score_total, price_at_detection) "
-                "VALUES ('2026-01-05T00:00:00+00:00', 70, 0.5)"
+                "VALUES ('2026-01-06T00:00:00+00:00', 70, 0.5)"
             )
             conn.commit()
             conn.close()
@@ -110,12 +138,12 @@ class TestBacktestExcludesLegacy(unittest.TestCase):
             with unittest.mock.patch.object(backtest_runner, "DB_PATH", path):
                 df, excluded = backtest_runner.load_alerts()
             self.assertEqual(len(df), 1)
-            self.assertEqual(int(df.iloc[0]["score_total"]), 68)  # solo la v4
-            self.assertEqual(excluded, 4)  # v1, v2, v3 y la NULL
+            self.assertEqual(int(df.iloc[0]["score_total"]), 72)  # solo la v5
+            self.assertEqual(excluded, 5)  # v1, v2, v3, v4 y la NULL
 
             with unittest.mock.patch.object(backtest_runner, "DB_PATH", path):
                 df_all, excluded_all = backtest_runner.load_alerts(scoring_version=None)
-            self.assertEqual(len(df_all), 5)
+            self.assertEqual(len(df_all), 6)
             self.assertEqual(excluded_all, 0)
 
 

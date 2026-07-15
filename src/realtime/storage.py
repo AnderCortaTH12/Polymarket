@@ -27,14 +27,17 @@ CREATE TABLE IF NOT EXISTS alerts (
     side                TEXT,            -- outcome comprado (Yes/No u otro)
     trade_size_usd      REAL,
     price_at_detection  REAL,            -- precio del outcome al detectar
-    score_total         INTEGER,
+    score_total         INTEGER,         -- score NORMALIZADO (0-100); decide la alerta (Fase 2)
     score_breakdown     TEXT,            -- JSON {componente: puntos}
     bucket_imbalance    REAL,
     username            TEXT,            -- name/pseudonym del trader (Polymarket)
     transaction_hash    TEXT,            -- referencia auditable on-chain
     market_slug         TEXT,            -- para el link a polymarket.com
     trade_side          TEXT,            -- BUY / SELL (el 'side' es el outcome)
-    scoring_version     TEXT             -- version del scoring que genero la alerta
+    scoring_version     TEXT,            -- version del scoring que genero la alerta
+    score_bruto         INTEGER,         -- suma de componentes sin normalizar (evidencia absoluta)
+    techo_evaluable     INTEGER,         -- suma de pesos de los componentes evaluables del trade
+    componentes_evaluables TEXT          -- JSON [nombres] que entraron en el techo (auditoria)
 );
 """
 
@@ -46,6 +49,10 @@ _ALERTS_EXTRA_COLUMNS: dict[str, str] = {
     "market_slug": "TEXT",
     "trade_side": "TEXT",
     "scoring_version": "TEXT",
+    # Fase 2 (defecto 2): normalizacion del score.
+    "score_bruto": "INTEGER",
+    "techo_evaluable": "INTEGER",
+    "componentes_evaluables": "TEXT",
 }
 
 
@@ -113,24 +120,33 @@ def save_alert(
 ) -> int:
     """Inserta una alerta con el score desglosado en JSON. Devuelve su id.
 
-    `score` es el `ScoreBreakdown` de `compute_score`; se guarda el total en
-    `score_total` y los componentes en `score_breakdown` (JSON) para poder
-    ajustar pesos despues sin perder informacion. `username`, `transaction_hash`,
-    `market_slug` y `trade_side` quedan como referencia legible y auditable.
+    `score` es el `ScoreBreakdown` de `compute_score`. `score_total` es el score
+    NORMALIZADO (0-100), el que decidio la alerta; se guardan tambien `score_bruto`
+    (suma sin normalizar, evidencia absoluta), `techo_evaluable` y
+    `componentes_evaluables` (JSON) para auditar la normalizacion, y los
+    componentes en `score_breakdown` (JSON) para ajustar pesos despues. `username`,
+    `transaction_hash`, `market_slug` y `trade_side` quedan como referencia auditable.
     """
     cur = conn.execute(
         "INSERT INTO alerts (ts, condition_id, market_question, wallet, side, "
         "trade_size_usd, price_at_detection, score_total, score_breakdown, bucket_imbalance, "
-        "username, transaction_hash, market_slug, trade_side, scoring_version) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "username, transaction_hash, market_slug, trade_side, scoring_version, "
+        "score_bruto, techo_evaluable, componentes_evaluables) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             ts, condition_id, market_question, wallet, side,
             trade_size_usd, price_at_detection, score.score_total,
             json.dumps(score.components()), bucket_imbalance,
             username, transaction_hash, market_slug, trade_side, config.SCORING_VERSION,
+            score.score_bruto, score.techo_evaluable,
+            json.dumps(score.componentes_evaluables),
         ),
     )
     conn.commit()
     alert_id = int(cur.lastrowid)
-    logger.info("Alerta %d guardada: %s score=%d wallet=%s", alert_id, condition_id, score.score_total, wallet)
+    logger.info(
+        "Alerta %d guardada: %s score=%d (bruto=%d/techo=%d) wallet=%s",
+        alert_id, condition_id, score.score_total, score.score_bruto,
+        score.techo_evaluable, wallet,
+    )
     return alert_id

@@ -5,6 +5,7 @@ perfil de wallet con un objeto simple. Sin red.
 """
 import sqlite3
 import unittest
+import unittest.mock
 from dataclasses import dataclass
 
 from src import config
@@ -40,7 +41,7 @@ class TestComputeScore(unittest.TestCase):
     def test_2_wallet_fresca(self) -> None:
         s = compute_score(_trade(), FakeProfile(wallet_age_days=5), 0.0)
         self.assertEqual(s.wallet_fresca, W["wallet_fresca"])
-        self.assertEqual(s.score_total, W["wallet_fresca"])
+        self.assertEqual(s.score_bruto, W["wallet_fresca"])  # score_total ahora es el normalizado
 
     def test_3_wallet_muy_fresca_suma_extra(self) -> None:
         s = compute_score(_trade(), FakeProfile(wallet_age_days=1), 0.0)
@@ -228,7 +229,86 @@ class TestFlujoToxicoVolumenMinimo(unittest.TestCase):
         prof = FakeProfile(wallet_age_days=1)
         s = compute_score(_trade(size=200000, price=0.10), prof, 0.0)  # $20000
         esperado = W["wallet_fresca"] + W["wallet_fresca_extra"] + W["tamano_anomalo"] + W["longshot"]
-        self.assertEqual(s.score_total, esperado)
+        # score_bruto es la suma sin normalizar (el "total" de antes).
+        self.assertEqual(s.score_bruto, esperado)  # 35+15+20 = 70
+        # Techo evaluable: wallet_fresca(35)+tamano(15)+longshot(20, price<=0.35)+
+        # flujo(15). cluster/concentracion fuera (sin funder, volumen 0);
+        # insensibilidad fuera (sin racha). = 85. Normalizado = round(100*70/85)=82.
+        self.assertEqual(s.techo_evaluable, 35 + 15 + 20 + 15)
+        self.assertEqual(s.score_normalizado, round(100 * 70 / 85))
+        self.assertEqual(s.score_total, s.score_normalizado)
+
+
+class TestNormalizacion(unittest.TestCase):
+    """Fase 2 (defecto 2): score normalizado por componentes evaluables."""
+
+    def test_sin_perfil_precio_alto_flujo_techo_exacto(self) -> None:
+        # Wallet sin perfil, precio 0.50 (longshot fuera), $12.000, flujo toxico.
+        # Evaluables: sin_perfil(20)+tamano(15)+flujo(15)=50. fresca/cluster/
+        # concentracion fuera (sin perfil / sin funder / volumen 0); longshot fuera
+        # por precio; insensibilidad fuera (sin racha). Bruto = 20+15+15 = 50.
+        md = {"bucket_volume_usd": 5000}
+        s = compute_score(_trade(size=24000, price=0.50, outcome="Yes"), None, 0.9, md)
+        self.assertEqual(s.techo_evaluable, 20 + 15 + 15)
+        self.assertEqual(set(s.componentes_evaluables), {"sin_perfil", "tamano_anomalo", "flujo_toxico"})
+        self.assertEqual(s.score_bruto, 50)
+        self.assertEqual(s.score_normalizado, 100)
+        self.assertEqual(s.score_total, 100)
+
+    def test_veterana_volumen_alto_sin_funder(self) -> None:
+        # Perfil veterano, sin funder, precio 0.50, sin racha, volumen alto, $12k,
+        # flujo toxico. Evaluables = wallet_fresca(35)+tamano(15)+concentracion(10)+
+        # flujo(15) = 75. Bruto = tamano(15)+flujo(15) = 30. Normalizado = 40.
+        prof = FakeProfile(wallet_age_days=300, funding_cluster_id=None,
+                           concentration=0.1, total_volume_usd=50000)
+        md = {"bucket_volume_usd": 5000}
+        s = compute_score(_trade(size=24000, price=0.50, outcome="Yes"), prof, 0.9, md)
+        self.assertEqual(s.techo_evaluable, 35 + 15 + 10 + 15)
+        self.assertEqual(s.score_bruto, 30)
+        self.assertEqual(s.score_normalizado, 40)
+        # "Aplica y no se activa" SI cuenta: concentracion evaluable (volumen alto)
+        # aunque de 0 puntos (concentration baja).
+        self.assertIn("concentracion", s.componentes_evaluables)
+        self.assertEqual(s.concentracion, 0)
+        # "No aplica" NO cuenta: cluster sin funder queda fuera del techo.
+        self.assertNotIn("cluster", s.componentes_evaluables)
+
+    def test_track_record_nunca_entra_en_el_techo(self) -> None:
+        prof = FakeProfile(wallet_age_days=300)
+        s = compute_score(_trade(size=24000, price=0.50), prof, 0.0, {})
+        self.assertNotIn("track_record", s.componentes_evaluables)
+
+    def test_mismo_bruto_distinto_techo_da_normalizados_distintos(self) -> None:
+        # Dos veteranas con el MISMO bruto (30 = tamano+flujo) pero distinto techo:
+        # A tiene volumen alto (concentracion evaluable, +10 al techo), B no.
+        md = {"bucket_volume_usd": 5000}
+        prof_a = FakeProfile(wallet_age_days=300, total_volume_usd=50000, concentration=0.1)
+        prof_b = FakeProfile(wallet_age_days=300, total_volume_usd=100, concentration=0.1)
+        sa = compute_score(_trade(size=24000, price=0.50, outcome="Yes"), prof_a, 0.9, md)
+        sb = compute_score(_trade(size=24000, price=0.50, outcome="Yes"), prof_b, 0.9, md)
+        self.assertEqual(sa.score_bruto, sb.score_bruto)      # mismo bruto (30)
+        self.assertEqual(sa.techo_evaluable, 75)             # con concentracion evaluable
+        self.assertEqual(sb.techo_evaluable, 65)             # sin ella
+        self.assertEqual(sa.score_normalizado, 40)
+        self.assertEqual(sb.score_normalizado, round(100 * 30 / 65))  # 46
+        self.assertNotEqual(sa.score_normalizado, sb.score_normalizado)
+
+    def test_techo_cero_no_rompe_la_division(self) -> None:
+        # Techo 0 es imposible en la practica (tamano y flujo siempre evaluables),
+        # pero la division debe estar protegida igualmente.
+        with unittest.mock.patch.object(config, "EVALUABILITY_RULES", {}):
+            s = compute_score(_trade(size=24000, price=0.50), None, 0.9, {"bucket_volume_usd": 5000})
+        self.assertEqual(s.techo_evaluable, 0)
+        self.assertEqual(s.score_normalizado, 0)
+        self.assertEqual(s.score_total, 0)
+
+    def test_componentes_agregados_no_estan_en_el_breakdown_json(self) -> None:
+        s = compute_score(_trade(size=24000, price=0.50), None, 0.9, {"bucket_volume_usd": 5000})
+        comp = s.components()
+        for f in ("score_bruto", "techo_evaluable", "score_normalizado",
+                  "componentes_evaluables", "score_total"):
+            self.assertNotIn(f, comp)
+        self.assertIn("sin_perfil", comp)
 
 
 class TestSaveAlert(unittest.TestCase):

@@ -11,16 +11,26 @@ trading informado. El backtest dira que combinaciones tienen valor predictivo.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from src import config
 from src.analysis.buckets import _trade_sign, _trade_usd
 
 
+# Campos agregados de ScoreBreakdown que NO son componentes del score: no deben
+# aparecer en el JSON de `components()` (que es "componente -> puntos"), sino en
+# columnas propias de la alerta.
+_NON_COMPONENT_FIELDS: tuple[str, ...] = (
+    "flujo_toxico_silenciado", "longshot_tier",
+    "score_bruto", "techo_evaluable", "score_normalizado",
+    "componentes_evaluables", "score_total",
+)
+
+
 @dataclass
 class ScoreBreakdown:
-    """Puntos por componente del score de un trade, mas el total."""
+    """Puntos por componente del score de un trade, mas los agregados normalizados."""
 
     wallet_fresca: int = 0
     sin_perfil: int = 0
@@ -37,12 +47,26 @@ class ScoreBreakdown:
     # Traza: precio_maximo del tramo de longshot que puntuo (o None si no aplico),
     # para analizar el rendimiento por tramo en el backtest.
     longshot_tier: float | None = None
+    # Fase 2 (defecto 2): normalizacion. score_bruto = suma de componentes (como
+    # antes); techo_evaluable = suma de pesos maximos de los componentes evaluables;
+    # score_normalizado = round(100 * bruto / techo). score_total = normalizado
+    # (es el que decide la alerta). componentes_evaluables = nombres que entraron
+    # en el techo (auditoria).
+    score_bruto: int = 0
+    techo_evaluable: int = 0
+    score_normalizado: int = 0
+    componentes_evaluables: list[str] = field(default_factory=list)
     score_total: int = 0
 
     def components(self) -> dict[str, Any]:
-        """Componentes (sin el total) para guardar como JSON en la alerta."""
+        """Componentes puros (componente -> puntos) para el JSON de la alerta.
+
+        Excluye los agregados normalizados y las trazas, que van en columnas
+        propias; asi el JSON sigue siendo "componente: puntos" para el backtest.
+        """
         d = asdict(self)
-        d.pop("score_total")
+        for f in _NON_COMPONENT_FIELDS:
+            d.pop(f, None)
         return d
 
 
@@ -155,9 +179,35 @@ def compute_score(
     if md.get("same_side_streak", 0) >= config.INSENSIBILITY_MIN_STREAK and md.get("price_against", False):
         b.insensibilidad_precio = w["insensibilidad_precio"]
 
-    b.score_total = (
+    # --- Score bruto (suma de componentes, como siempre) --------------------
+    b.score_bruto = (
         b.wallet_fresca + b.sin_perfil + b.tamano_anomalo + b.longshot
         + b.track_record + b.cluster + b.concentracion + b.flujo_toxico
         + b.insensibilidad_precio
     )
+
+    # --- Techo de componentes EVALUABLES y normalizacion (Fase 2 defecto 2) --
+    # Un componente entra en el techo si sus precondiciones estructurales se
+    # cumplen (config.EVALUABILITY_RULES), aunque haya dado 0 puntos. Asi el
+    # score se normaliza contra "lo que se podia detectar en este trade", no
+    # contra un maximo teorico que muchas ramas nunca podrian alcanzar.
+    ctx = {
+        "has_profile": wallet_profile is not None,
+        "price": price,
+        "cluster_id": getattr(wallet_profile, "funding_cluster_id", None) if wallet_profile else None,
+        "total_volume_usd": total_volume,
+        "same_side_streak": int(md.get("same_side_streak", 0) or 0),
+    }
+    techo = 0
+    evaluables: list[str] = []
+    for comp, is_evaluable in config.EVALUABILITY_RULES.items():
+        if is_evaluable(ctx):
+            techo += config.component_ceiling(comp)
+            evaluables.append(comp)
+    b.techo_evaluable = techo
+    b.componentes_evaluables = evaluables
+    b.score_normalizado = round(100 * b.score_bruto / techo) if techo > 0 else 0
+
+    # score_total es el NORMALIZADO: es el que decide la alerta (umbral en %).
+    b.score_total = b.score_normalizado
     return b

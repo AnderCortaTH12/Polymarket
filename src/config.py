@@ -69,6 +69,8 @@ def relevance_floor(price: float | None) -> float:
         if price <= price_max:
             return min_usd
     return RELEVANCE_TIERS[-1][1]
+
+
 SUSPICIOUS_WIN_RATE: float = 0.8
 MIN_RESOLVED_FOR_WINRATE: int = 10
 CONCENTRATION_MIN: float = 0.7
@@ -80,7 +82,52 @@ TOXIC_IMBALANCE: float = 0.75
 MIN_BUCKET_VOLUME_FOR_TOXICITY_USD: float = 1_500.0
 INSENSIBILITY_MIN_STREAK: int = 3
 
-# Score minimo para generar una alerta.
+# Fase 2 (defecto 2): NORMALIZACION del score por componentes evaluables.
+# El score bruto es una suma de techos dispares por rama (sin-perfil llega a ~85,
+# fresca a ~120), asi que un bruto de 60 no significa lo mismo en cada caso y no
+# es comparable. Se normaliza a 0-100 dividiendo el bruto por el TECHO de los
+# componentes EVALUABLES del trade.
+#
+# EVALUABLE = sus precondiciones ESTRUCTURALES se cumplen, AUNQUE de 0 puntos.
+# Tres estados: (a) no aplica -> fuera del techo (imposible estructuralmente);
+# (b) aplica y no se activa -> DENTRO del techo (un "no" informativo, suma 0);
+# (c) aplica y se activa -> dentro del techo, suma sus puntos. La distincion es
+# estructural (que podia pasar), no de conducta (que paso).
+#
+# Las reglas reciben un `ctx` (dict) con el contexto ya extraido por el scorer:
+#   has_profile: bool         -> la wallet tiene perfil (toda wallet tiene edad)
+#   price: float | None       -> precio del outcome operado
+#   cluster_id: str | None    -> funding_cluster_id del perfil (comparte funder)
+#   total_volume_usd: float   -> volumen total historico de la wallet
+#   same_side_streak: int     -> racha de mismo-lado en el mercado (>=1 si hubo)
+# track_record NO aparece: peso 0, nunca entra en el techo (ni evaluable ni suma).
+from typing import Callable  # noqa: E402
+
+EVALUABILITY_RULES: dict[str, Callable[[dict], bool]] = {
+    "wallet_fresca": lambda c: c["has_profile"],
+    "sin_perfil": lambda c: not c["has_profile"],
+    "tamano_anomalo": lambda c: True,
+    "longshot": lambda c: c["price"] is not None and c["price"] <= LONGSHOT_MAX_PRICE,
+    "cluster": lambda c: bool(c["cluster_id"]),
+    "concentracion": lambda c: c["total_volume_usd"] > CONCENTRATION_MIN_VOLUME_USD,
+    "flujo_toxico": lambda c: True,
+    "insensibilidad_precio": lambda c: c["same_side_streak"] >= 1,
+}
+
+
+def component_ceiling(component: str) -> int:
+    """Puntos MAXIMOS que un componente puede aportar al techo.
+
+    Igual a su peso en SCORE_WEIGHTS, salvo wallet_fresca, que puede sumar el peso
+    base MAS el extra de wallet muy fresca (el maximo alcanzable por esa rama).
+    """
+    if component == "wallet_fresca":
+        return SCORE_WEIGHTS["wallet_fresca"] + SCORE_WEIGHTS["wallet_fresca_extra"]
+    return SCORE_WEIGHTS.get(component, 0)
+
+
+# Umbral de alerta, ahora como PORCENTAJE (0-100) sobre el score NORMALIZADO.
+# Se mantiene en 50 por ahora; se afinara con el backtest cuando haya alertas v5.
 ALERT_THRESHOLD: int = 50
 
 # Perfilado bajo demanda en el detector (Fase 1). El detector construye el
@@ -93,10 +140,11 @@ PROFILE_TTL_HOURS: float = 24.0
 
 # Version del scoring. Las alertas se etiquetan con esto para que el backtest no
 # mezcle scorings incompatibles: v1 (perfilado inactivo), v2 (track_record activo
-# sobre un win_rate falso), v3 (track_record desactivado, Fase 1c) y v4 (veto de
-# relevancia economica escalonado por precio, Fase 2: cambia QUE genera alerta).
-# El backtest y el dashboard filtran a v4 por defecto.
-SCORING_VERSION: str = "v4"
+# sobre un win_rate falso), v3 (track_record desactivado, Fase 1c), v4 (veto de
+# relevancia escalonado por precio, Fase 2) y v5 (score NORMALIZADO por
+# componentes evaluables: cambia COMO se decide la alerta). El backtest y el
+# dashboard filtran a v5 por defecto.
+SCORING_VERSION: str = "v5"
 
 # Notificaciones por Telegram (ver DESPLIEGUE_VPS.md). El chat_id es el ID
 # privado del usuario; se obtiene tras escribir /start al bot (paso en la doc).
