@@ -18,7 +18,7 @@ import json
 import html
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -259,6 +259,8 @@ class Detector:
         self._streaks: dict[tuple[str, str], dict[str, Any]] = {}
         self.trades_processed = 0
         self.vetoed_by_size = 0   # Fase 2: trades descartados por no alcanzar el suelo de relevancia
+        self.notifs_sent = 0      # notificaciones de Telegram enviadas
+        self.notifs_deduped = 0   # notificaciones suprimidas por anti-spam (wallet+mercado reciente)
         self.ws_connected = False
 
         # Perfilado bajo demanda: cache en memoria wallet -> (perfil|None, epoch),
@@ -378,17 +380,42 @@ class Detector:
             _trade_usd(trade), trade.get("transactionHash"),
         )
 
-        # 7b. Notificacion push (bonus; nunca debe romper el flujo del detector)
+        # 7b. Notificacion push (bonus; nunca debe romper el flujo del detector).
+        # La alerta YA se guardo arriba pase lo que pase; aqui solo decidimos si
+        # ademas mandamos Telegram, deduplicando el spam por (wallet, mercado).
         if alert_id:
-            send_telegram_alert({
-                "market_title": trade.get("title") or trade.get("slug") or "",
-                "outcome": trade.get("outcome") or "",
-                "score": score.score_total,
-                "username": display_name(trade),
-                "size_usd": _trade_usd(trade),
-                "side": trade.get("side") or "",
-            })
+            self._notify_deduped(alert_id, wallet, cid, trade, score.score_total)
         return alert_id
+
+    def _notify_deduped(
+        self, alert_id: int, wallet: str, cid: str, trade: dict[str, Any], score_total: int
+    ) -> None:
+        """Envia el Telegram salvo que ya se notificara esta wallet+mercado <6h.
+
+        Anti-spam en la capa de notificacion (NO en la deteccion): la alerta ya
+        esta en la BD. Si dentro de NOTIFY_DEDUPE_HOURS existe otra notificacion
+        real de la misma (wallet, condition_id), se salta el envio y notified_at
+        queda NULL. Solo al enviar de verdad se marca notified_at = now.
+        """
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(hours=config.NOTIFY_DEDUPE_HOURS)).isoformat()
+        if storage.recent_notification_exists(self.conn, wallet, cid, cutoff):
+            self.notifs_deduped += 1
+            logger.info(
+                "notif. deduplicada wallet=%s market=%s (%d deduplicadas)",
+                wallet, cid, self.notifs_deduped,
+            )
+            return
+        send_telegram_alert({
+            "market_title": trade.get("title") or trade.get("slug") or "",
+            "outcome": trade.get("outcome") or "",
+            "score": score_total,
+            "username": display_name(trade),
+            "size_usd": _trade_usd(trade),
+            "side": trade.get("side") or "",
+        })
+        storage.mark_notified(self.conn, alert_id, now.isoformat())
+        self.notifs_sent += 1
 
     # --- perfilado bajo demanda (con red, en un hilo) -----------------------
     async def _resolve_profile(
@@ -462,9 +489,11 @@ class Detector:
         if self.trades_processed % PROFILE_METRICS_EVERY == 0:
             logger.info(
                 "Perfilado: %d construidos, %d de cache/BD, %d fallidos, "
-                "%d vetados_por_tamaño (%d trades, %d en cache)",
+                "%d vetados_por_tamaño | Notif: %d enviadas, %d deduplicadas "
+                "(%d trades, %d en cache)",
                 self._profiled_built, self._profiled_cached, self._profiled_failed,
-                self.vetoed_by_size, self.trades_processed, len(self._profile_cache),
+                self.vetoed_by_size, self.notifs_sent, self.notifs_deduped,
+                self.trades_processed, len(self._profile_cache),
             )
 
     # --- refrescos (con red, fuera del camino critico) ----------------------

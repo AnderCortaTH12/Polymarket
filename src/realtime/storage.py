@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     scoring_version     TEXT,            -- version del scoring que genero la alerta
     score_bruto         INTEGER,         -- suma de componentes sin normalizar (evidencia absoluta)
     techo_evaluable     INTEGER,         -- suma de pesos de los componentes evaluables del trade
-    componentes_evaluables TEXT          -- JSON [nombres] que entraron en el techo (auditoria)
+    componentes_evaluables TEXT,         -- JSON [nombres] que entraron en el techo (auditoria)
+    notified_at         TEXT             -- ISO UTC si se envio la notif. Telegram; NULL si se dedupeo
 );
 """
 
@@ -53,6 +54,9 @@ _ALERTS_EXTRA_COLUMNS: dict[str, str] = {
     "score_bruto": "INTEGER",
     "techo_evaluable": "INTEGER",
     "componentes_evaluables": "TEXT",
+    # Anti-spam de notificaciones: momento en que se envio el Telegram (NULL si
+    # se dedupeo o aun no se ha notificado).
+    "notified_at": "TEXT",
 }
 
 
@@ -150,3 +154,27 @@ def save_alert(
         score.techo_evaluable, wallet,
     )
     return alert_id
+
+
+def recent_notification_exists(
+    conn: sqlite3.Connection, wallet: str, condition_id: str, cutoff_iso: str
+) -> bool:
+    """True si ya se notifico esta (wallet, condition_id) desde `cutoff_iso`.
+
+    Base del anti-spam: mira si alguna alerta de la MISMA wallet y MISMO mercado
+    tiene `notified_at` (envio real) dentro de la ventana. Las alertas se guardan
+    con timestamps ISO UTC homogeneos (offset +00:00), por lo que la comparacion
+    lexicografica `>=` equivale a la temporal.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM alerts WHERE wallet = ? AND condition_id = ? "
+        "AND notified_at IS NOT NULL AND notified_at >= ? LIMIT 1",
+        (wallet, condition_id, cutoff_iso),
+    ).fetchone()
+    return row is not None
+
+
+def mark_notified(conn: sqlite3.Connection, alert_id: int, notified_at: str) -> None:
+    """Marca una alerta como notificada (Telegram enviado) con su timestamp ISO UTC."""
+    conn.execute("UPDATE alerts SET notified_at = ? WHERE id = ?", (notified_at, alert_id))
+    conn.commit()

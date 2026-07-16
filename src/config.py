@@ -130,6 +130,13 @@ def component_ceiling(component: str) -> int:
 # Se mantiene en 50 por ahora; se afinara con el backtest cuando haya alertas v5.
 ALERT_THRESHOLD: int = 50
 
+# Anti-spam de notificaciones (solo capa de notificacion, NO la deteccion). Una
+# misma wallet repitiendo trades casi identicos en el mismo mercado dispara una
+# notificacion de Telegram por trade (bombardeo). Se deduplica por (wallet,
+# condition_id): si ya se notifico esa clave en las ultimas NOTIFY_DEDUPE_HOURS,
+# no se reenvia. La alerta SIEMPRE se guarda en la BD (el backtest la necesita).
+NOTIFY_DEDUPE_HOURS: float = 6.0
+
 # Perfilado bajo demanda en el detector (Fase 1). El detector construye el
 # perfil de una wallet EN EL MOMENTO (Data API + Polygonscan) solo si el trade
 # merece la pena: o es grande (>= PROFILING_MIN_TRADE_USD) o ya cumple un tramo

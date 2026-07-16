@@ -10,9 +10,11 @@ import os
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from src import config
+from src import config, db
+from src.analysis.scoring import ScoreBreakdown
 from src.analysis.profiles import WalletProfile
 from src.realtime.stream import Detector, display_name, is_politics_trade, send_telegram_alert
 from src.realtime import storage
@@ -345,6 +347,130 @@ class TestRelevanceVeto(unittest.TestCase):
         det = self._det()
         _run(det.process_trade(_trade(size=5000 / 0.50, price=0.50)))  # suelo 3.000, $5.000 pasa
         self.assertEqual(det.vetoed_by_size, 0)
+
+
+class TestNotifyDedupe(unittest.TestCase):
+    """Anti-spam: deduplicar notificaciones de Telegram por (wallet, mercado)."""
+
+    def setUp(self) -> None:
+        # Espiamos el envio de Telegram sin tocar la red.
+        self.send = patch("src.realtime.stream.send_telegram_alert").start()
+        self.addCleanup(patch.stopall)
+        # Perfilado sin red (perfil None): no afecta al alerta ni al dedupe.
+        patch("src.realtime.stream.build_profile", side_effect=RuntimeError("sin red")).start()
+
+    def _det(self) -> Detector:
+        conn = storage.connect(":memory:")
+        conn.executescript(WALLET_PROFILES_SCHEMA)
+        conn.executescript(VOLUME_BUCKETS_SCHEMA)
+        conn.commit()
+        det = Detector(conn, db_path=":memory:")
+        det.politics_conditions = {"0xPOL", "0xPOL2"}
+        return det
+
+    def _alert_trade(self, **over):
+        # Trade que supera el umbral: $12.000 a 0.10 (sin_perfil+tamano+longshot).
+        base = dict(size=120000, price=0.10)
+        base.update(over)
+        return _trade(**base)
+
+    def _notified_at(self, det, alert_id):
+        return det.conn.execute(
+            "SELECT notified_at FROM alerts WHERE id=?", (alert_id,)
+        ).fetchone()[0]
+
+    def test_primera_alerta_notifica_y_marca_notified_at(self) -> None:
+        det = self._det()
+        aid = _run(det.process_trade(self._alert_trade()))
+        self.assertIsNotNone(aid)
+        self.send.assert_called_once()
+        self.assertEqual(det.notifs_sent, 1)
+        self.assertEqual(det.notifs_deduped, 0)
+        self.assertIsNotNone(self._notified_at(det, aid))
+
+    def test_segunda_misma_wallet_mercado_dentro_de_ventana_no_notifica(self) -> None:
+        det = self._det()
+        aid1 = _run(det.process_trade(self._alert_trade()))
+        aid2 = _run(det.process_trade(self._alert_trade()))
+        # Solo se envio una vez; la alerta 2 SI se guardo pero con notified_at NULL.
+        self.send.assert_called_once()
+        self.assertEqual(det.notifs_sent, 1)
+        self.assertEqual(det.notifs_deduped, 1)
+        self.assertIsNotNone(self._notified_at(det, aid1))
+        self.assertIsNone(self._notified_at(det, aid2))
+        self.assertEqual(det.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 2)
+
+    def test_misma_wallet_otro_mercado_si_notifica(self) -> None:
+        det = self._det()
+        _run(det.process_trade(self._alert_trade(conditionId="0xPOL")))
+        _run(det.process_trade(self._alert_trade(conditionId="0xPOL2")))
+        self.assertEqual(self.send.call_count, 2)  # clave (wallet, mercado) distinta
+        self.assertEqual(det.notifs_deduped, 0)
+
+    def test_pasada_la_ventana_vuelve_a_notificar(self) -> None:
+        det = self._det()
+        aid1 = _run(det.process_trade(self._alert_trade()))
+        # Envejecemos la primera notificacion 7h (> NOTIFY_DEDUPE_HOURS).
+        old = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
+        det.conn.execute("UPDATE alerts SET notified_at=? WHERE id=?", (old, aid1))
+        det.conn.commit()
+        _run(det.process_trade(self._alert_trade()))
+        self.assertEqual(self.send.call_count, 2)  # fuera de ventana -> reenvia
+        self.assertEqual(det.notifs_deduped, 0)
+
+    def test_alerta_siempre_se_guarda_aunque_se_dedupee(self) -> None:
+        det = self._det()
+        for _ in range(3):
+            _run(det.process_trade(self._alert_trade()))
+        # 3 alertas guardadas, 1 notificacion enviada, 2 deduplicadas.
+        self.assertEqual(det.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 3)
+        self.assertEqual(det.notifs_sent, 1)
+        self.assertEqual(det.notifs_deduped, 2)
+
+
+class TestStorageDedupeHelpers(unittest.TestCase):
+    """Helpers de dedupe y migracion idempotente de notified_at."""
+
+    def test_recent_notification_exists_y_mark(self) -> None:
+        conn = storage.connect(":memory:")
+        score = ScoreBreakdown(score_total=60)
+        aid = storage.save_alert(
+            conn, ts="2026-07-16T00:00:00+00:00", condition_id="0xC", market_question="M",
+            wallet="0xW", side="Yes", trade_size_usd=12000.0, price_at_detection=0.1, score=score,
+        )
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+        # Sin notificar todavia -> no existe.
+        self.assertFalse(storage.recent_notification_exists(conn, "0xW", "0xC", cutoff))
+        storage.mark_notified(conn, aid, datetime.now(timezone.utc).isoformat())
+        self.assertTrue(storage.recent_notification_exists(conn, "0xW", "0xC", cutoff))
+        # Otra clave (mercado distinto) no cuenta.
+        self.assertFalse(storage.recent_notification_exists(conn, "0xW", "0xOTRO", cutoff))
+        conn.close()
+
+    def test_migracion_notified_at_idempotente(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.db")
+            # Tabla vieja SIN notified_at.
+            conn = db.connect(path)
+            conn.executescript(
+                "CREATE TABLE alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, "
+                "condition_id TEXT, wallet TEXT, score_total INTEGER);"
+            )
+            conn.execute("INSERT INTO alerts (ts, score_total) VALUES ('2026-01-01T00:00:00+00:00', 60)")
+            conn.commit()
+            conn.close()
+
+            conn = storage.connect(path)  # migra
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}
+            self.assertIn("notified_at", cols)
+            val = conn.execute("SELECT notified_at FROM alerts").fetchone()[0]
+            self.assertIsNone(val)  # las viejas quedan sin notificar
+            conn.close()
+
+            conn = storage.connect(path)  # reejecutar no falla
+            cols2 = {r[1] for r in conn.execute("PRAGMA table_info(alerts)")}
+            self.assertIn("notified_at", cols2)
+            conn.close()
 
 
 class TestSendTelegram(unittest.TestCase):
