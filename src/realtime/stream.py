@@ -261,7 +261,6 @@ class Detector:
         self._streaks: dict[tuple[str, str], dict[str, Any]] = {}
         self.trades_processed = 0
         self.vetoed_by_size = 0   # Fase 2: trades descartados por no alcanzar el suelo de relevancia
-        self.vetoed_by_price = 0  # Fase 6: trades descartados por precio >= 0.96 o <= 0.04
         self.notifs_sent = 0      # notificaciones de Telegram enviadas
         self.notifs_deduped = 0   # notificaciones suprimidas por anti-spam (wallet+mercado reciente)
         self.ws_connected = False
@@ -327,14 +326,6 @@ class Detector:
             veto_price = None
         if trade_usd < config.relevance_floor(veto_price):
             self.vetoed_by_size += 1
-            return None
-
-        # 2c. VETO por TECHO DE PRECIO (Fase 6). Si el precio es >= 0.96 o <= 0.04,
-        # el recorrido maximo a resolucion es < 4%: no hay espacio para movimiento
-        # informado. Se veta igual que el veto de tamaño: sin perfilar, sin puntuar.
-        if veto_price is not None and (veto_price >= config.PRICE_CEILING_VETO or
-                                       veto_price <= config.PRICE_FLOOR_VETO):
-            self.vetoed_by_price += 1
             return None
 
         wallet = trade.get("proxyWallet") or ""
@@ -500,13 +491,11 @@ class Detector:
         """Cada N trades, loguea el estado del perfilado (construidos/cache/fallos)."""
         if self.trades_processed % PROFILE_METRICS_EVERY == 0:
             logger.info(
-                "Perfilado: %d construidos, %d de cache/BD, %d fallidos | "
-                "Vetos: %d por tamaño, %d por precio | "
-                "Notif: %d enviadas, %d deduplicadas "
+                "Perfilado: %d construidos, %d de cache/BD, %d fallidos, "
+                "%d vetados_por_tamaño | Notif: %d enviadas, %d deduplicadas "
                 "(%d trades, %d en cache)",
                 self._profiled_built, self._profiled_cached, self._profiled_failed,
-                self.vetoed_by_size, self.vetoed_by_price,
-                self.notifs_sent, self.notifs_deduped,
+                self.vetoed_by_size, self.notifs_sent, self.notifs_deduped,
                 self.trades_processed, len(self._profile_cache),
             )
 
@@ -653,13 +642,10 @@ def configure_logging() -> None:
 def main() -> None:
     """Arranca el detector."""
     configure_logging()
-    # Dejar en el journal que umbrales de relevancia y precio estaban vigentes.
+    # Dejar en el journal que umbrales de relevancia estaban vigentes (Fase 2).
     logger.info(
-        "Scoring %s | veto de relevancia RELEVANCE_TIERS=%s | "
-        "veto de precio: >= %.2f o <= %.2f | umbral alerta=%d",
-        config.SCORING_VERSION, config.RELEVANCE_TIERS,
-        config.PRICE_CEILING_VETO, config.PRICE_FLOOR_VETO,
-        config.ALERT_THRESHOLD,
+        "Scoring %s | veto de relevancia RELEVANCE_TIERS=%s | umbral alerta=%d",
+        config.SCORING_VERSION, config.RELEVANCE_TIERS, config.ALERT_THRESHOLD,
     )
     conn = storage.connect()
     # aseguramos tambien las tablas de perfiles y cubos (mismo SQLite)

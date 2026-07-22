@@ -508,67 +508,6 @@ class TestSendTelegram(unittest.TestCase):
                              "username": "u", "size_usd": 1, "side": "BUY"})
 
 
-class TestPriceCeilingVeto(unittest.TestCase):
-    """Verifica que el veto por techo de precio (>= 0.96) funciona correctamente."""
-
-    def test_veto_precio_alto_0_998(self) -> None:
-        """Trade a precio 0.998 (cerca del techo) debe ser vetado."""
-        det = _mem_detector()
-        alert_id = _run(det.process_trade(_trade(size=120000, price=0.998)))
-        self.assertIsNone(alert_id, "Trade a precio 0.998 debe estar vetado")
-        self.assertEqual(det.vetoed_by_price, 1, "Debe contar veto de precio")
-
-    def test_veto_precio_techo_exacto_0_96(self) -> None:
-        """Trade a precio 0.96 (borde) debe estar vetado (>= 0.96)."""
-        det = _mem_detector()
-        alert_id = _run(det.process_trade(_trade(size=120000, price=0.96)))
-        self.assertIsNone(alert_id, "Trade a precio 0.96 debe estar vetado")
-        self.assertEqual(det.vetoed_by_price, 1)
-
-    def test_no_veto_precio_bajo_0_959(self) -> None:
-        """Trade a precio 0.959 (justo antes del techo) debe pasar el veto."""
-        det = _mem_detector()
-        alert_id = _run(det.process_trade(_trade(size=120000, price=0.959)))
-        # Puede no generar alerta (score bajo), pero no debe vetarse por precio.
-        self.assertEqual(det.vetoed_by_price, 0, "Trade a precio 0.959 no debe estar vetado por precio")
-
-    def test_veto_precio_bajo_0_02(self) -> None:
-        """Trade a precio 0.02 (<= 0.04) debe estar vetado (simetrico)."""
-        det = _mem_detector()
-        alert_id = _run(det.process_trade(_trade(size=120000, price=0.02)))
-        self.assertIsNone(alert_id, "Trade a precio 0.02 debe estar vetado")
-        self.assertEqual(det.vetoed_by_price, 1)
-
-    def test_veto_precio_piso_exacto_0_04(self) -> None:
-        """Trade a precio 0.04 (borde) debe estar vetado (<= 0.04)."""
-        det = _mem_detector()
-        alert_id = _run(det.process_trade(_trade(size=120000, price=0.04)))
-        self.assertIsNone(alert_id, "Trade a precio 0.04 debe estar vetado")
-        self.assertEqual(det.vetoed_by_price, 1)
-
-    def test_no_veto_precio_alto_0_041(self) -> None:
-        """Trade a precio 0.041 (justo arriba del piso) debe pasar el veto."""
-        det = _mem_detector()
-        alert_id = _run(det.process_trade(_trade(size=120000, price=0.041)))
-        self.assertEqual(det.vetoed_by_price, 0, "Trade a precio 0.041 no debe estar vetado por precio")
-
-    def test_no_veto_precio_medio_0_70(self) -> None:
-        """Trade a precio 0.70 (rango medio) debe pasar el veto de precio."""
-        det = _mem_detector()
-        alert_id = _run(det.process_trade(_trade(size=120000, price=0.70)))
-        self.assertEqual(det.vetoed_by_price, 0, "Trade a precio 0.70 no debe estar vetado")
-        # Puede alertar o no, pero no por veto de precio.
-
-    def test_veto_precio_precio_none_no_veta(self) -> None:
-        """Trade sin precio definido no debe vetarse por techo de precio."""
-        det = _mem_detector()
-        trade = _trade(size=120000, price=0.70)
-        trade.pop("price")  # remover precio
-        alert_id = _run(det.process_trade(trade))
-        # No se veta por None; se procesa normal (puede alertar o no).
-        self.assertEqual(det.vetoed_by_price, 0)
-
-
 class TestLoggingConfiguration(unittest.TestCase):
     """Verifica que la configuración de logging usa RotatingFileHandler."""
 

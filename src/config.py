@@ -54,13 +54,6 @@ RELEVANCE_TIERS: list[tuple[float, float]] = [
 # de RELEVANCE_TIERS por encima de esto solo sirven para el veto, no para longshot.
 LONGSHOT_MAX_PRICE: float = 0.35
 
-# Veto por TECHO DE PRECIO (Fase 6): trades a precio >= esto NO pueden generar alerta.
-# En precio 0.96+, el recorrido maximo a resolucion es <4% (no trading informado, es
-# market-making/arbitraje). Simetrico: precio <= PRICE_FLOOR_VETO se veta igual.
-# Racional: si el trade no tiene ESPACIO para moverse, no hay evidencia de conviccion.
-PRICE_CEILING_VETO: float = 0.96
-PRICE_FLOOR_VETO: float = 0.04
-
 
 def relevance_floor(price: float | None) -> float:
     """Suelo de relevancia economica ($) para un trade a este precio.
@@ -155,9 +148,10 @@ PROFILE_TTL_HOURS: float = 24.0
 # Version del scoring. Las alertas se etiquetan con esto para que el backtest no
 # mezcle scorings incompatibles: v1 (perfilado inactivo), v2 (track_record activo
 # sobre un win_rate falso), v3 (track_record desactivado, Fase 1c), v4 (veto de
-# relevancia escalonado por precio, Fase 2), v5 (score NORMALIZADO por componentes
-# evaluables) y v6 (veto por techo/piso de precio: recorrido maximo < 4%).
-SCORING_VERSION: str = "v6"
+# relevancia escalonado por precio, Fase 2) y v5 (score NORMALIZADO por
+# componentes evaluables: cambia COMO se decide la alerta). El backtest y el
+# dashboard filtran a v5 por defecto.
+SCORING_VERSION: str = "v5"
 
 # Notificaciones por Telegram (ver DESPLIEGUE_VPS.md). El chat_id es el ID
 # privado del usuario; se obtiene tras escribir /start al bot (paso en la doc).

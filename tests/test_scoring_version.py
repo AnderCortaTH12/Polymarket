@@ -73,7 +73,7 @@ class TestScoringVersionMigration(unittest.TestCase):
         )
         version = conn.execute("SELECT scoring_version FROM alerts WHERE id=?", (aid,)).fetchone()[0]
         self.assertEqual(version, config.SCORING_VERSION)
-        self.assertEqual(version, "v6")
+        self.assertEqual(version, "v5")
         conn.close()
 
     def test_save_alert_guarda_los_cuatro_campos_de_normalizacion(self) -> None:
@@ -97,7 +97,7 @@ class TestScoringVersionMigration(unittest.TestCase):
         self.assertEqual(row[2], 75)   # techo
         self.assertEqual(__import__("json").loads(row[3]),
                          ["wallet_fresca", "tamano_anomalo", "concentracion", "flujo_toxico"])
-        self.assertEqual(row[4], "v6")
+        self.assertEqual(row[4], "v5")
         conn.close()
 
 
