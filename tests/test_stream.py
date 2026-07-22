@@ -173,9 +173,8 @@ class TestProcessTrade(unittest.TestCase):
             main_conn = storage.connect(":memory:")  # self.conn creada en ESTE hilo
             det = Detector(main_conn, db_path=dbp)
 
-            with patch("src.realtime.stream.get_politics_events", return_value=[]), \
-                 patch("src.realtime.stream.flatten_markets",
-                       return_value=[{"condition_id": "0xC"}]):
+            with patch("src.realtime.stream.get_political_condition_ids",
+                       return_value={"0xC"}):
                 t = threading.Thread(target=det.refresh_context)
                 t.start()
                 t.join()
@@ -507,6 +506,60 @@ class TestSendTelegram(unittest.TestCase):
         # No debe lanzar aunque el POST falle.
         send_telegram_alert({"market_title": "M", "outcome": "Yes", "score": 70,
                              "username": "u", "size_usd": 1, "side": "BUY"})
+
+
+class TestLoggingConfiguration(unittest.TestCase):
+    """Verifica que la configuración de logging usa RotatingFileHandler."""
+
+    def test_configure_logging_usa_rotating_handler(self) -> None:
+        import logging.handlers
+        from pathlib import Path
+
+        log_path = Path(__file__).parent / ".." / "logs" / "test_detector.log"
+        log_dir = log_path.parent
+
+        try:
+            with patch("src.realtime.stream.LOG_FILE", log_path), \
+                 patch("src.realtime.stream.LOG_DIR", log_dir):
+                from src.realtime.stream import configure_logging
+
+                # Limpiar handlers existentes para este test.
+                root_logger = logging.getLogger()
+                old_handlers = root_logger.handlers[:]
+                for h in old_handlers:
+                    root_logger.removeHandler(h)
+                    if hasattr(h, 'close'):
+                        h.close()
+
+                try:
+                    configure_logging()
+
+                    root_logger = logging.getLogger()
+                    rotating_handlers = [
+                        h for h in root_logger.handlers
+                        if isinstance(h, logging.handlers.RotatingFileHandler)
+                    ]
+                    self.assertGreater(len(rotating_handlers), 0,
+                                      "No RotatingFileHandler found in logging configuration")
+
+                    handler = rotating_handlers[0]
+                    self.assertEqual(handler.maxBytes, 20 * 1024 * 1024, "maxBytes debe ser 20 MB")
+                    self.assertEqual(handler.backupCount, 5, "backupCount debe ser 5")
+                finally:
+                    # Restaurar handlers originales y cerrar los nuevos.
+                    for h in root_logger.handlers[:]:
+                        root_logger.removeHandler(h)
+                        if hasattr(h, 'close'):
+                            h.close()
+                    for h in old_handlers:
+                        root_logger.addHandler(h)
+        finally:
+            # Limpiar archivo de prueba si existe.
+            if log_path.exists():
+                try:
+                    log_path.unlink()
+                except PermissionError:
+                    pass
 
 
 if __name__ == "__main__":

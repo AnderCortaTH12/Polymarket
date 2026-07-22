@@ -12,8 +12,9 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
-from src.client.gamma import flatten_markets, get_politics_events
+from src.client.gamma import flatten_markets, get_politics_events, get_political_condition_ids
 from src.collector.models import connect
+from src.collector.retention import purge_old_snapshots, DEFAULT_RETENTION_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +30,15 @@ INSERT OR REPLACE INTO snapshots (
 
 
 def take_snapshot(conn: sqlite3.Connection) -> int:
-    """Toma un snapshot: descarga, aplana e inserta los mercados. Devuelve cuantos."""
+    """Toma un snapshot: descarga, aplana e inserta solo mercados de política. Devuelve cuantos."""
     started = time.monotonic()
     ts = datetime.now(timezone.utc).isoformat()
 
     events = get_politics_events()
     markets = flatten_markets(events)
+    politics_ids = get_political_condition_ids(events=events)
 
+    total_markets = len([m for m in markets if m["market_id"]])
     rows = [
         (
             ts,
@@ -55,13 +58,13 @@ def take_snapshot(conn: sqlite3.Connection) -> int:
             m["end_date"],
         )
         for m in markets
-        if m["market_id"]
+        if m["market_id"] and m.get("condition_id") in politics_ids
     ]
+    elapsed = time.monotonic() - started
+    logger.info("Snapshot %s: %d mercados totales, %d de política insertados en %.1fs",
+                ts, total_markets, len(rows), elapsed)
     conn.executemany(_INSERT_SQL, rows)
     conn.commit()
-
-    elapsed = time.monotonic() - started
-    logger.info("Snapshot %s: %d mercados insertados en %.1fs", ts, len(rows), elapsed)
     return len(rows)
 
 
@@ -71,6 +74,10 @@ def main() -> None:
     parser.add_argument(
         "--loop", type=int, metavar="N",
         help=f"Repetir cada N segundos (minimo {MIN_LOOP_SECONDS}). Sin esto, un solo snapshot.",
+    )
+    parser.add_argument(
+        "--retention-days", type=int, default=DEFAULT_RETENTION_DAYS, metavar="D",
+        help=f"Dias de snapshots a mantener (defecto {DEFAULT_RETENTION_DAYS}).",
     )
     args = parser.parse_args()
 
@@ -85,13 +92,20 @@ def main() -> None:
     interval = max(args.loop, MIN_LOOP_SECONDS)
     if interval != args.loop:
         logger.warning("Intervalo elevado a %ds (minimo permitido)", interval)
-    logger.info("Iniciando loop cada %ds. Ctrl+C para parar.", interval)
+    logger.info("Iniciando loop cada %ds (retención: %d días). Ctrl+C para parar.",
+               interval, args.retention_days)
+    next_purge = datetime.now(timezone.utc)
     try:
         while True:
             try:
                 take_snapshot(conn)
+                now = datetime.now(timezone.utc)
+                if now >= next_purge:
+                    purge_old_snapshots(conn, days=args.retention_days)
+                    next_purge = now.replace(hour=0, minute=0, second=0, microsecond=0) + \
+                                 __import__('datetime').timedelta(days=1)
             except Exception:  # noqa: BLE001 - un fallo puntual no debe matar el loop
-                logger.exception("Error tomando snapshot; se reintenta en el siguiente ciclo")
+                logger.exception("Error en loop; se reintenta en el siguiente ciclo")
             time.sleep(interval)
     except KeyboardInterrupt:
         logger.info("Loop detenido por el usuario")

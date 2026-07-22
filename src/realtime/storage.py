@@ -82,9 +82,27 @@ SERVICE_HEALTH_SCHEMA: str = """
 CREATE TABLE IF NOT EXISTS service_health (
     ts                TEXT PRIMARY KEY,
     trades_processed  INTEGER,
-    ws_connected      INTEGER
+    ws_connected      INTEGER,
+    service           TEXT,            -- nombre del servicio (disco_monitor, etc)
+    status            TEXT,            -- estado: ok, warning, error
+    message           TEXT             -- mensaje de diagnostico
 );
 """
+
+_SERVICE_HEALTH_EXTRA_COLUMNS: dict[str, str] = {
+    "service": "TEXT",
+    "status": "TEXT",
+    "message": "TEXT",
+}
+
+
+def _ensure_service_health_columns(conn: sqlite3.Connection) -> None:
+    """Añade columnas nuevas a service_health si no existen."""
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(service_health)")}
+    for col, decl in _SERVICE_HEALTH_EXTRA_COLUMNS.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE service_health ADD COLUMN {col} {decl}")
+    conn.commit()
 
 
 def connect(db_path: Any = DB_PATH) -> sqlite3.Connection:
@@ -94,6 +112,7 @@ def connect(db_path: Any = DB_PATH) -> sqlite3.Connection:
     conn.executescript(SERVICE_HEALTH_SCHEMA)
     conn.commit()
     _ensure_columns(conn)
+    _ensure_service_health_columns(conn)
     return conn
 
 

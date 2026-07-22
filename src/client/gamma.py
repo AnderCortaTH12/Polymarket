@@ -157,6 +157,24 @@ def flatten_markets(
     return rows
 
 
+def get_political_condition_ids(
+    events: list[dict[str, Any]] | None = None,
+    only_tradeable: bool = True,
+) -> set[str]:
+    """Devuelve el set de condition_ids de mercados de política activos.
+
+    Si `events` no se proporciona, obtiene eventos de política desde Gamma
+    (tag_slug=politics). Los aplana a mercados, filtra por active/tradeable
+    si procede, y extrae los condition_ids. Esta función es usada tanto por
+    el detector como por el collector para garantizar que usan EXACTAMENTE
+    el mismo criterio de filtro de política.
+    """
+    if events is None:
+        events = get_politics_events()
+    markets = flatten_markets(events, only_tradeable=only_tradeable)
+    return {m["condition_id"] for m in markets if m.get("condition_id")}
+
+
 def _main() -> None:
     """Descarga eventos de política e imprime los 10 mercados con más volumen 24h."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

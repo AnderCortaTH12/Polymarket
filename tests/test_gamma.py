@@ -5,7 +5,7 @@ entrega como strings JSON.
 """
 import unittest
 
-from src.client.gamma import flatten_markets
+from src.client.gamma import flatten_markets, get_political_condition_ids
 
 
 class TestFlattenMarkets(unittest.TestCase):
@@ -86,6 +86,54 @@ class TestOnlyTradeableFilter(unittest.TestCase):
     def test_only_tradeable_false_no_filtra(self) -> None:
         rows = flatten_markets([self._event_con(True, True)], only_tradeable=False)
         self.assertEqual(len(rows), 1)
+
+
+class TestPoliticalConditionIds(unittest.TestCase):
+    """Verifica que get_political_condition_ids filtra correctamente."""
+
+    def _fake_event_with_cond(self, cond_id: str, active: bool, closed: bool) -> dict:
+        return {
+            "slug": "e",
+            "markets": [{
+                "id": "m",
+                "conditionId": cond_id,
+                "active": active,
+                "closed": closed,
+            }]
+        }
+
+    def test_extrae_condition_ids_de_mercados_politicos(self) -> None:
+        events = [
+            self._fake_event_with_cond("0xPOL1", True, False),
+            self._fake_event_with_cond("0xPOL2", True, False),
+        ]
+        result = get_political_condition_ids(events=events)
+        self.assertEqual(result, {"0xPOL1", "0xPOL2"})
+
+    def test_excluye_mercados_no_negociables(self) -> None:
+        events = [
+            self._fake_event_with_cond("0xPOL1", True, False),   # tradeable
+            self._fake_event_with_cond("0xCLOSED", True, True),  # cerrado
+            self._fake_event_with_cond("0xINACT", False, False), # inactivo
+        ]
+        result = get_political_condition_ids(events=events, only_tradeable=True)
+        self.assertEqual(result, {"0xPOL1"})
+
+    def test_incluye_todos_si_only_tradeable_false(self) -> None:
+        events = [
+            self._fake_event_with_cond("0xPOL1", True, False),
+            self._fake_event_with_cond("0xCLOSED", True, True),
+        ]
+        result = get_political_condition_ids(events=events, only_tradeable=False)
+        self.assertEqual(result, {"0xPOL1", "0xCLOSED"})
+
+    def test_ignora_mercados_sin_condition_id(self) -> None:
+        events = [
+            self._fake_event_with_cond("0xPOL1", True, False),
+            {"slug": "e", "markets": [{"id": "m", "active": True, "closed": False}]},  # sin conditionId
+        ]
+        result = get_political_condition_ids(events=events)
+        self.assertEqual(result, {"0xPOL1"})
 
 
 if __name__ == "__main__":

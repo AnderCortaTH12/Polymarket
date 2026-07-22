@@ -17,6 +17,7 @@ import asyncio
 import json
 import html
 import logging
+import logging.handlers
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -44,9 +45,10 @@ from src.analysis.profiles import (
     save_profile,
 )
 from src.analysis.scoring import compute_score
-from src.client.gamma import flatten_markets, get_politics_events
+from src.client.gamma import flatten_markets, get_politics_events, get_political_condition_ids
 from src.collector.models import DB_PATH
 from src.realtime import storage
+from src.system.health import check_disk_usage, should_alert_disk_usage, log_disk_alert
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +264,7 @@ class Detector:
         self.notifs_sent = 0      # notificaciones de Telegram enviadas
         self.notifs_deduped = 0   # notificaciones suprimidas por anti-spam (wallet+mercado reciente)
         self.ws_connected = False
+        self._disk_check_count = 0  # contador para chequear disco cada 10 min (600s / 60s = 10 ciclos)
 
         # Perfilado bajo demanda: cache en memoria wallet -> (perfil|None, epoch),
         # TTL en segundos, semaforo para acotar concurrencia y contadores para las
@@ -506,8 +509,7 @@ class Detector:
         la lectura; WAL permite que coexista con las escrituras del camino caliente.
         """
         try:
-            markets = flatten_markets(get_politics_events())
-            self.politics_conditions = {m["condition_id"] for m in markets if m.get("condition_id")}
+            self.politics_conditions = get_political_condition_ids()
             conn = db.connect(self.db_path)
             try:
                 self.shared_cluster_ids = load_shared_cluster_ids(conn)
@@ -550,13 +552,35 @@ class Detector:
             await ws.send("PING")
 
     async def _heartbeat_loop(self) -> None:
-        """Escribe un latido por minuto en service_health."""
+        """Escribe un latido por minuto en service_health y chequea disco cada 10 min."""
         while True:
             storage.save_heartbeat(
                 self.conn, datetime.now(timezone.utc).isoformat(),
                 self.trades_processed, self.ws_connected,
             )
+            self._disk_check_count += 1
+            if self._disk_check_count >= 10:  # cada 600s (10 min)
+                self._disk_check_count = 0
+                await self._check_disk_and_alert()
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+
+    async def _check_disk_and_alert(self) -> None:
+        """Chequea uso de disco y envía alerta por Telegram si supera 85%."""
+        try:
+            usage = check_disk_usage()
+            if should_alert_disk_usage(self.conn, usage):
+                log_disk_alert(self.conn, usage)
+                send_telegram_alert({
+                    "market_title": "⚠️ Alerta de disco",
+                    "outcome": f"Uso: {usage*100:.1f}%",
+                    "score": 0,
+                    "username": "System Monitor",
+                    "size_usd": 0,
+                    "side": "ALERT",
+                })
+                logger.warning("Disco lleno: %.1f%% de uso", usage * 100)
+        except Exception:  # noqa: BLE001
+            logger.exception("Error chequeando uso de disco")
 
     async def _refresh_loop(self) -> None:
         """Refresca el contexto cada 10 min (en un hilo para no bloquear el loop)."""
@@ -597,9 +621,17 @@ class Detector:
 
 
 def configure_logging() -> None:
-    """Logging a consola y a fichero logs/detector.log."""
+    """Logging a consola y a fichero logs/detector.log con rotación diaria."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    handlers = [logging.StreamHandler(), logging.FileHandler(LOG_FILE, encoding="utf-8")]
+    handlers = [
+        logging.StreamHandler(),
+        logging.handlers.RotatingFileHandler(
+            LOG_FILE,
+            encoding="utf-8",
+            maxBytes=20 * 1024 * 1024,  # 20 MB
+            backupCount=5,              # 5 ficheros rotados
+        ),
+    ]
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
