@@ -23,6 +23,7 @@ from typing import Any
 
 import pandas as pd
 
+from src import config
 from src.analysis import backtest_live_alerts as bt
 from src.analysis.backtest_live_alerts import ExitStrategy, LivePriceResolver
 from src.collector.models import DB_PATH
@@ -45,14 +46,28 @@ MAIN_STRATEGIES: tuple[ExitStrategy, ...] = (
 )
 
 
-def load_alerts(min_score: int = 0, scoring_version: str | None = "v5") -> tuple[pd.DataFrame, int]:
+# Sentinel para distinguir "no se paso scoring_version" (usar la version vigente,
+# config.SCORING_VERSION) de "se paso explicitamente None" (--include-legacy: no
+# filtrar por version). Usar config.SCORING_VERSION como default directamente no
+# serviria porque se evaluaria una sola vez al importar el modulo, no en cada
+# llamada; con el sentinel se resuelve dentro de la funcion, siempre al dia.
+_CURRENT_VERSION = object()
+
+
+def load_alerts(
+    min_score: int = 0, scoring_version: str | None | object = _CURRENT_VERSION
+) -> tuple[pd.DataFrame, int]:
     """Carga las alertas de la BD como DataFrame, filtrando por version del scoring.
 
-    Por defecto solo devuelve las alertas del scoring vigente (v5). Las anteriores
-    no son comparables: v1 (perfilado inactivo), v2 (track_record sobre un
-    win_rate falso), v3 (sin veto de relevancia), v4 (score sin normalizar, umbral
-    sobre el bruto). Devuelve (df, n_legacy_excluidas) para avisar por pantalla.
+    Por defecto solo devuelve las alertas del scoring VIGENTE (config.SCORING_VERSION,
+    resuelto en cada llamada, nunca hardcodeado). Las versiones anteriores no son
+    comparables entre si (cada una cambio la logica de deteccion o normalizacion).
+    Pasa `scoring_version=None` para incluir todas (--include-legacy), o un string
+    concreto para analizar una version pasada especifica (--version). Devuelve
+    (df, n_excluidas) para avisar por pantalla.
     """
+    if scoring_version is _CURRENT_VERSION:
+        scoring_version = config.SCORING_VERSION
     conn = storage.connect(DB_PATH)
     try:
         base = (
@@ -220,20 +235,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-score", type=int, default=0, help="Solo alertas con score_total >= este valor.")
     parser.add_argument(
         "--include-legacy", "--include-v1", dest="include_legacy", action="store_true",
-        help="Incluir las alertas v1-v4 (scorings antiguos). Por defecto se excluyen.",
+        help="Incluir alertas de TODAS las versiones de scoring. Por defecto solo se "
+             "usa la vigente (config.SCORING_VERSION).",
+    )
+    parser.add_argument(
+        "--version", dest="version", default=None,
+        help="Analizar una version de scoring concreta (ej. v5) en vez de la vigente. "
+             "Ignorado si se pasa --include-legacy.",
     )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    scoring_version = None if args.include_legacy else "v5"
+    if args.include_legacy:
+        scoring_version = None
+    elif args.version:
+        scoring_version = args.version
+    else:
+        scoring_version = config.SCORING_VERSION
     alerts, excluded_legacy = load_alerts(args.min_score, scoring_version)
     if excluded_legacy:
         print(
-            f"[aviso] Excluidas {excluded_legacy} alertas v1-v4: se puntuaron con "
-            "scorings antiguos no comparables con el vigente (v5, score normalizado) "
-            "y contaminarian el backtest. Usa --include-legacy para incluirlas "
-            "(no recomendado)."
+            f"[aviso] Excluidas {excluded_legacy} alertas: se puntuaron con versiones de "
+            f"scoring distintas de la analizada ({scoring_version}) y no son comparables "
+            "entre si (cada version cambio la logica de deteccion o normalizacion). "
+            "Usa --include-legacy para incluirlas todas, o --version para elegir otra "
+            "version concreta (no recomendado para sacar conclusiones)."
         )
     if alerts.empty:
         print("No hay alertas en la BD (o ninguna supera --min-score). Nada que backtestear.")

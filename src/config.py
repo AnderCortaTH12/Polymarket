@@ -140,7 +140,7 @@ NOTIFY_DEDUPE_HOURS: float = 6.0
 # Perfilado bajo demanda en el detector (Fase 1). El detector construye el
 # perfil de una wallet EN EL MOMENTO (Data API + Polygonscan) solo si el trade
 # merece la pena: o es grande (>= PROFILING_MIN_TRADE_USD) o ya cumple un tramo
-# de LONGSHOT_TIERS (para no perder entradas tipo "$800 a 0.07"). Los perfiles
+# de RELEVANCE_TIERS (para no perder entradas tipo "$800 a 0.07"). Los perfiles
 # se cachean y se reconstruyen si superan PROFILE_TTL_HOURS.
 PROFILING_MIN_TRADE_USD: float = 2_500.0
 PROFILE_TTL_HOURS: float = 24.0

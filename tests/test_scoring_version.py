@@ -102,33 +102,36 @@ class TestScoringVersionMigration(unittest.TestCase):
 
 
 class TestBacktestExcludesLegacy(unittest.TestCase):
-    def test_load_alerts_excluye_v1_a_v4_por_defecto(self) -> None:
+    def test_load_alerts_excluye_legacy_por_defecto_usando_la_version_vigente(self) -> None:
+        """load_alerts() sin argumentos debe filtrar por config.SCORING_VERSION,
+        NUNCA por un literal hardcodeado. Si alguien sube SCORING_VERSION y no
+        toca backtest_runner, este test debe FALLAR: inserta una alerta con la
+        version vigente y varias con versiones anteriores/distintas, y comprueba
+        que solo sobrevive la vigente (comparando contra config.SCORING_VERSION,
+        no contra un string fijo como 'v5').
+        """
         from src import backtest_runner
+
+        current = config.SCORING_VERSION
+        # Versiones "viejas" sinteticas: cualquier string distinto de la vigente,
+        # generadas sin asumir un esquema v1..v4 concreto (irrelevante para el test).
+        legacy_versions = [f"__legacy_{i}__" for i in range(4)]
 
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "t.db")
             conn = storage.connect(path)
+            for i, ver in enumerate(legacy_versions):
+                conn.execute(
+                    "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
+                    "VALUES (?, ?, 0.5, ?)",
+                    (f"2026-01-0{i + 1}T00:00:00+00:00", 50 + i, ver),
+                )
             conn.execute(
                 "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
-                "VALUES ('2026-01-01T00:00:00+00:00', 50, 0.5, 'v1')"
+                "VALUES ('2026-01-05T00:00:00+00:00', 72, 0.5, ?)",
+                (current,),
             )
-            conn.execute(
-                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
-                "VALUES ('2026-01-02T00:00:00+00:00', 60, 0.5, 'v2')"
-            )
-            conn.execute(
-                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
-                "VALUES ('2026-01-03T00:00:00+00:00', 65, 0.5, 'v3')"
-            )
-            conn.execute(
-                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
-                "VALUES ('2026-01-04T00:00:00+00:00', 68, 0.5, 'v4')"
-            )
-            conn.execute(
-                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
-                "VALUES ('2026-01-05T00:00:00+00:00', 72, 0.5, 'v5')"
-            )
-            conn.execute(  # NULL cuenta como legacy (v1)
+            conn.execute(  # NULL cuenta como legacy (se trata como 'v1')
                 "INSERT INTO alerts (ts, score_total, price_at_detection) "
                 "VALUES ('2026-01-06T00:00:00+00:00', 70, 0.5)"
             )
@@ -138,13 +141,45 @@ class TestBacktestExcludesLegacy(unittest.TestCase):
             with unittest.mock.patch.object(backtest_runner, "DB_PATH", path):
                 df, excluded = backtest_runner.load_alerts()
             self.assertEqual(len(df), 1)
-            self.assertEqual(int(df.iloc[0]["score_total"]), 72)  # solo la v5
-            self.assertEqual(excluded, 5)  # v1, v2, v3, v4 y la NULL
+            self.assertEqual(int(df.iloc[0]["score_total"]), 72)  # solo la vigente
+            self.assertEqual(excluded, len(legacy_versions) + 1)  # legacy + la NULL
 
             with unittest.mock.patch.object(backtest_runner, "DB_PATH", path):
                 df_all, excluded_all = backtest_runner.load_alerts(scoring_version=None)
-            self.assertEqual(len(df_all), 6)
+            self.assertEqual(len(df_all), len(legacy_versions) + 2)
             self.assertEqual(excluded_all, 0)
+
+    def test_load_alerts_permite_analizar_una_version_concreta(self) -> None:
+        """--version X (pasado como scoring_version explicito) filtra por esa
+        version en vez de la vigente, sin necesidad de --include-legacy."""
+        from src import backtest_runner
+
+        # Version "objetivo" a analizar, deliberadamente distinta de la vigente
+        # (config.SCORING_VERSION) para no acoplar el test a su valor actual.
+        target = f"__target_{config.SCORING_VERSION}__"
+        other = f"__other_{config.SCORING_VERSION}__"
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.db")
+            conn = storage.connect(path)
+            conn.execute(
+                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
+                "VALUES ('2026-01-01T00:00:00+00:00', 50, 0.5, ?)",
+                (target,),
+            )
+            conn.execute(
+                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
+                "VALUES ('2026-01-02T00:00:00+00:00', 60, 0.5, ?)",
+                (other,),
+            )
+            conn.commit()
+            conn.close()
+
+            with unittest.mock.patch.object(backtest_runner, "DB_PATH", path):
+                df, excluded = backtest_runner.load_alerts(scoring_version=target)
+            self.assertEqual(len(df), 1)
+            self.assertEqual(int(df.iloc[0]["score_total"]), 50)
+            self.assertEqual(excluded, 1)
 
 
 if __name__ == "__main__":
