@@ -55,6 +55,16 @@ RELEVANCE_TIERS: list[tuple[float, float]] = [
 LONGSHOT_MAX_PRICE: float = 0.35
 
 
+# Veto por TECHO/PISO DE PRECIO: trades a precio >= PRICE_CEILING_VETO o
+# <= PRICE_FLOOR_VETO NO puntuan ni pueden generar alerta. Comprar algo YA casi
+# seguro (>0.96) o YA casi imposible (<0.04) no es señal informativa: el
+# recorrido maximo a resolucion es <4%, tipico de market-making/arbitraje, no de
+# trading informado. Se aplica junto al veto de relevancia economica (mismo
+# punto en stream.py, antes de perfilar), asi que tampoco gasta llamadas de red.
+PRICE_CEILING_VETO: float = 0.96
+PRICE_FLOOR_VETO: float = 0.04
+
+
 def relevance_floor(price: float | None) -> float:
     """Suelo de relevancia economica ($) para un trade a este precio.
 
@@ -148,10 +158,22 @@ PROFILE_TTL_HOURS: float = 24.0
 # Version del scoring. Las alertas se etiquetan con esto para que el backtest no
 # mezcle scorings incompatibles: v1 (perfilado inactivo), v2 (track_record activo
 # sobre un win_rate falso), v3 (track_record desactivado, Fase 1c), v4 (veto de
-# relevancia escalonado por precio, Fase 2) y v5 (score NORMALIZADO por
-# componentes evaluables: cambia COMO se decide la alerta). El backtest y el
-# dashboard filtran a v5 por defecto.
-SCORING_VERSION: str = "v5"
+# relevancia escalonado por precio, Fase 2), v5 (score NORMALIZADO por
+# componentes evaluables: cambia COMO se decide la alerta) y v6 (añade el veto
+# de precio extremo, ver PRICE_CEILING_VETO/PRICE_FLOOR_VETO: cambia QUE trades
+# entran al scoring, no como se puntuan).
+SCORING_VERSION: str = "v6"
+
+# v5 y v6 usan EXACTAMENTE la misma logica de scoring (mismos SCORE_WEIGHTS,
+# misma normalizacion, mismo techo evaluable): la unica diferencia es que v6
+# descarta ademas los trades a precio extremo (>= PRICE_CEILING_VETO o
+# <= PRICE_FLOOR_VETO) antes de puntuar. Sus scores son comparables y se pueden
+# analizar juntas en el backtest para tener mas muestra, EXCEPTO en analisis que
+# dependan especificamente de trades a precio extremo (ej. tramos de longshot
+# muy bajos o muy altos), que v6 ya no genera y por tanto infrarrepresenta en la
+# muestra combinada. Actualizar esta lista si una version futura vuelve a
+# cambiar solo el veto/filtro de entrada sin tocar pesos ni normalizacion.
+SCORING_COMPATIBLE_VERSIONS: list[str] = ["v5", "v6"]
 
 # Notificaciones por Telegram (ver DESPLIEGUE_VPS.md). El chat_id es el ID
 # privado del usuario; se obtiene tras escribir /start al bot (paso en la doc).

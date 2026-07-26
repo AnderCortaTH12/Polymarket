@@ -348,6 +348,77 @@ class TestRelevanceVeto(unittest.TestCase):
         self.assertEqual(det.vetoed_by_size, 0)
 
 
+class TestPriceExtremeVeto(unittest.TestCase):
+    """v6: veto por techo/piso de precio (recorrido maximo a resolucion < 4%)."""
+
+    def setUp(self) -> None:
+        patcher = patch("src.realtime.stream.requests.post")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _det(self) -> Detector:
+        conn = storage.connect(":memory:")
+        conn.executescript(WALLET_PROFILES_SCHEMA)
+        conn.executescript(VOLUME_BUCKETS_SCHEMA)
+        conn.commit()
+        det = Detector(conn, db_path=":memory:")
+        det.politics_conditions = {"0xPOL"}
+        return det
+
+    def test_precio_098_vetado_por_precio_no_perfila(self) -> None:
+        det = self._det()
+        # $12.000 a 0.98: tamaño de sobra para pasar el veto de relevancia y
+        # perfilar, pero el precio (>= PRICE_CEILING_VETO=0.96) debe vetarlo antes.
+        with patch("src.realtime.stream.build_profile") as mock_bp:
+            aid = _run(det.process_trade(_trade(size=12000 / 0.98, price=0.98)))
+        self.assertIsNone(aid)
+        self.assertEqual(det.vetoed_by_price, 1)
+        self.assertEqual(det.vetoed_by_size, 0)
+        self.assertEqual(det.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 0)
+        mock_bp.assert_not_called()
+
+    def test_precio_002_vetado_por_precio_no_perfila(self) -> None:
+        det = self._det()
+        # $12.000 a 0.02: idem, pero por el piso (<= PRICE_FLOOR_VETO=0.04).
+        with patch("src.realtime.stream.build_profile") as mock_bp:
+            aid = _run(det.process_trade(_trade(size=12000 / 0.02, price=0.02)))
+        self.assertIsNone(aid)
+        self.assertEqual(det.vetoed_by_price, 1)
+        self.assertEqual(det.vetoed_by_size, 0)
+        self.assertEqual(det.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0], 0)
+        mock_bp.assert_not_called()
+
+    def test_precio_050_tamano_suficiente_pasa_ambos_vetos_y_puntua(self) -> None:
+        det = self._det()
+        # $12.000 a 0.50: precio intermedio (pasa el veto de precio), tamaño de
+        # sobra (pasa el veto de relevancia, suelo 3.000 a ese precio).
+        prof = WalletProfile(wallet="0xWALLET")
+        with patch("src.realtime.stream.build_profile", return_value=prof), \
+             patch("src.realtime.stream.save_profile"):
+            aid = _run(det.process_trade(_trade(size=12000 / 0.50, price=0.50)))
+        self.assertEqual(det.vetoed_by_price, 0)
+        self.assertEqual(det.vetoed_by_size, 0)
+        self.assertEqual(det.trades_processed, 1)
+        del aid  # puede o no alertar segun el score; lo relevante es que se puntuo
+
+    def test_caso_maduro_800_a_007_no_vetado_por_precio_genera_alerta(self) -> None:
+        det = self._det()
+        # $800 a 0.07: precio > PRICE_FLOOR_VETO (0.04) => no vetado por precio.
+        # Pasa el veto de tamaño por el tramo longshot (suelo 500 a ese precio).
+        prof = WalletProfile(wallet="0xWALLET", wallet_age_days=0.5)
+        with patch("src.realtime.stream.build_profile", return_value=prof), \
+             patch("src.realtime.stream.save_profile"):
+            aid = _run(det.process_trade(_trade(size=800 / 0.07, price=0.07)))
+        self.assertEqual(det.vetoed_by_price, 0)
+        self.assertEqual(det.vetoed_by_size, 0)
+        self.assertIsNotNone(aid)  # sigue generando alerta como antes de v6
+        row = det.conn.execute(
+            "SELECT scoring_version FROM alerts WHERE id=?", (aid,)
+        ).fetchone()
+        self.assertEqual(row[0], config.SCORING_VERSION)
+        self.assertEqual(row[0], "v6")
+
+
 class TestNotifyDedupe(unittest.TestCase):
     """Anti-spam: deduplicar notificaciones de Telegram por (wallet, mercado)."""
 

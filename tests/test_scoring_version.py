@@ -73,7 +73,7 @@ class TestScoringVersionMigration(unittest.TestCase):
         )
         version = conn.execute("SELECT scoring_version FROM alerts WHERE id=?", (aid,)).fetchone()[0]
         self.assertEqual(version, config.SCORING_VERSION)
-        self.assertEqual(version, "v5")
+        self.assertEqual(version, "v6")
         conn.close()
 
     def test_save_alert_guarda_los_cuatro_campos_de_normalizacion(self) -> None:
@@ -97,56 +97,59 @@ class TestScoringVersionMigration(unittest.TestCase):
         self.assertEqual(row[2], 75)   # techo
         self.assertEqual(__import__("json").loads(row[3]),
                          ["wallet_fresca", "tamano_anomalo", "concentracion", "flujo_toxico"])
-        self.assertEqual(row[4], "v5")
+        self.assertEqual(row[4], "v6")
         conn.close()
 
 
 class TestBacktestExcludesLegacy(unittest.TestCase):
-    def test_load_alerts_excluye_legacy_por_defecto_usando_la_version_vigente(self) -> None:
-        """load_alerts() sin argumentos debe filtrar por config.SCORING_VERSION,
-        NUNCA por un literal hardcodeado. Si alguien sube SCORING_VERSION y no
-        toca backtest_runner, este test debe FALLAR: inserta una alerta con la
-        version vigente y varias con versiones anteriores/distintas, y comprueba
-        que solo sobrevive la vigente (comparando contra config.SCORING_VERSION,
-        no contra un string fijo como 'v5').
+    def test_load_alerts_por_defecto_incluye_las_versiones_compatibles(self) -> None:
+        """load_alerts() sin argumentos debe filtrar por
+        config.SCORING_COMPATIBLE_VERSIONS, NUNCA por un literal hardcodeado.
+        Si alguien cambia esa lista y no toca backtest_runner, este test debe
+        FALLAR: inserta una alerta por cada version compatible vigente y varias
+        con versiones fuera de esa lista, y comprueba que sobreviven exactamente
+        las compatibles (comparando contra config.SCORING_COMPATIBLE_VERSIONS, no
+        contra strings fijos como 'v5'/'v6').
         """
         from src import backtest_runner
 
-        current = config.SCORING_VERSION
-        # Versiones "viejas" sinteticas: cualquier string distinto de la vigente,
-        # generadas sin asumir un esquema v1..v4 concreto (irrelevante para el test).
-        legacy_versions = [f"__legacy_{i}__" for i in range(4)]
+        compatible = list(config.SCORING_COMPATIBLE_VERSIONS)
+        self.assertGreaterEqual(len(compatible), 1)
+        # Versiones "no compatibles" sinteticas: cualquier string fuera de la
+        # lista vigente, sin asumir un esquema v1..v4 concreto.
+        incompatible_versions = [f"__incompatible_{i}__" for i in range(3)]
 
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "t.db")
             conn = storage.connect(path)
-            for i, ver in enumerate(legacy_versions):
+            for i, ver in enumerate(incompatible_versions):
                 conn.execute(
                     "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
                     "VALUES (?, ?, 0.5, ?)",
                     (f"2026-01-0{i + 1}T00:00:00+00:00", 50 + i, ver),
                 )
-            conn.execute(
-                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
-                "VALUES ('2026-01-05T00:00:00+00:00', 72, 0.5, ?)",
-                (current,),
-            )
-            conn.execute(  # NULL cuenta como legacy (se trata como 'v1')
+            for j, ver in enumerate(compatible):
+                conn.execute(
+                    "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
+                    "VALUES (?, ?, 0.5, ?)",
+                    (f"2026-02-0{j + 1}T00:00:00+00:00", 70 + j, ver),
+                )
+            conn.execute(  # NULL cuenta como no-compatible (se trata como 'v1')
                 "INSERT INTO alerts (ts, score_total, price_at_detection) "
-                "VALUES ('2026-01-06T00:00:00+00:00', 70, 0.5)"
+                "VALUES ('2026-01-09T00:00:00+00:00', 65, 0.5)"
             )
             conn.commit()
             conn.close()
 
             with unittest.mock.patch.object(backtest_runner, "DB_PATH", path):
                 df, excluded = backtest_runner.load_alerts()
-            self.assertEqual(len(df), 1)
-            self.assertEqual(int(df.iloc[0]["score_total"]), 72)  # solo la vigente
-            self.assertEqual(excluded, len(legacy_versions) + 1)  # legacy + la NULL
+            self.assertEqual(len(df), len(compatible))
+            self.assertEqual(sorted(df["score_total"].tolist()), sorted(70 + j for j in range(len(compatible))))
+            self.assertEqual(excluded, len(incompatible_versions) + 1)  # no-compatibles + NULL
 
             with unittest.mock.patch.object(backtest_runner, "DB_PATH", path):
                 df_all, excluded_all = backtest_runner.load_alerts(scoring_version=None)
-            self.assertEqual(len(df_all), len(legacy_versions) + 2)
+            self.assertEqual(len(df_all), len(compatible) + len(incompatible_versions) + 1)
             self.assertEqual(excluded_all, 0)
 
     def test_load_alerts_permite_analizar_una_version_concreta(self) -> None:
@@ -180,6 +183,61 @@ class TestBacktestExcludesLegacy(unittest.TestCase):
             self.assertEqual(len(df), 1)
             self.assertEqual(int(df.iloc[0]["score_total"]), 50)
             self.assertEqual(excluded, 1)
+
+    def test_load_alerts_por_defecto_incluye_v5_y_v6(self) -> None:
+        """Caso concreto pedido: v5 y v6 comparten scoring (mismo peso/
+        normalizacion/techo), asi que el backtest debe incluir ambas por
+        defecto sin --include-legacy ni --version."""
+        from src import backtest_runner
+
+        self.assertEqual(config.SCORING_COMPATIBLE_VERSIONS, ["v5", "v6"])
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.db")
+            conn = storage.connect(path)
+            conn.execute(
+                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
+                "VALUES ('2026-01-01T00:00:00+00:00', 55, 0.5, 'v5')"
+            )
+            conn.execute(
+                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
+                "VALUES ('2026-01-02T00:00:00+00:00', 65, 0.5, 'v6')"
+            )
+            conn.execute(
+                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
+                "VALUES ('2026-01-03T00:00:00+00:00', 75, 0.5, 'v4')"
+            )
+            conn.commit()
+            conn.close()
+
+            with unittest.mock.patch.object(backtest_runner, "DB_PATH", path):
+                df, excluded = backtest_runner.load_alerts()
+            self.assertEqual(sorted(df["score_total"].tolist()), [55, 65])
+            self.assertEqual(excluded, 1)  # solo la v4
+
+    def test_load_alerts_version_v6_excluye_v5(self) -> None:
+        """--version v6 debe incluir SOLO v6, aunque v5 sea compatible."""
+        from src import backtest_runner
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.db")
+            conn = storage.connect(path)
+            conn.execute(
+                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
+                "VALUES ('2026-01-01T00:00:00+00:00', 55, 0.5, 'v5')"
+            )
+            conn.execute(
+                "INSERT INTO alerts (ts, score_total, price_at_detection, scoring_version) "
+                "VALUES ('2026-01-02T00:00:00+00:00', 65, 0.5, 'v6')"
+            )
+            conn.commit()
+            conn.close()
+
+            with unittest.mock.patch.object(backtest_runner, "DB_PATH", path):
+                df, excluded = backtest_runner.load_alerts(scoring_version="v6")
+            self.assertEqual(len(df), 1)
+            self.assertEqual(int(df.iloc[0]["score_total"]), 65)
+            self.assertEqual(excluded, 1)  # la v5
 
 
 if __name__ == "__main__":

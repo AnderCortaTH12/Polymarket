@@ -46,28 +46,41 @@ MAIN_STRATEGIES: tuple[ExitStrategy, ...] = (
 )
 
 
-# Sentinel para distinguir "no se paso scoring_version" (usar la version vigente,
-# config.SCORING_VERSION) de "se paso explicitamente None" (--include-legacy: no
-# filtrar por version). Usar config.SCORING_VERSION como default directamente no
-# serviria porque se evaluaria una sola vez al importar el modulo, no en cada
-# llamada; con el sentinel se resuelve dentro de la funcion, siempre al dia.
-_CURRENT_VERSION = object()
+# Sentinel para distinguir "no se paso scoring_version" (usar las versiones
+# scoring-compatibles vigentes, config.SCORING_COMPATIBLE_VERSIONS) de "se paso
+# explicitamente None" (--include-legacy: no filtrar por version). Usar la lista
+# de config como default directamente no serviria porque se evaluaria una sola
+# vez al importar el modulo, no en cada llamada; con el sentinel se resuelve
+# dentro de la funcion, siempre al dia.
+_COMPATIBLE_VERSIONS = object()
 
 
 def load_alerts(
-    min_score: int = 0, scoring_version: str | None | object = _CURRENT_VERSION
+    min_score: int = 0,
+    scoring_version: str | list[str] | None | object = _COMPATIBLE_VERSIONS,
 ) -> tuple[pd.DataFrame, int]:
     """Carga las alertas de la BD como DataFrame, filtrando por version del scoring.
 
-    Por defecto solo devuelve las alertas del scoring VIGENTE (config.SCORING_VERSION,
-    resuelto en cada llamada, nunca hardcodeado). Las versiones anteriores no son
-    comparables entre si (cada una cambio la logica de deteccion o normalizacion).
-    Pasa `scoring_version=None` para incluir todas (--include-legacy), o un string
-    concreto para analizar una version pasada especifica (--version). Devuelve
-    (df, n_excluidas) para avisar por pantalla.
+    Por defecto devuelve las alertas de las versiones SCORING-COMPATIBLES vigentes
+    (config.SCORING_COMPATIBLE_VERSIONS, resuelto en cada llamada, nunca
+    hardcodeado): comparten pesos, normalizacion y techo evaluable, asi que se
+    analizan juntas para tener mas muestra. Las versiones fuera de esa lista no
+    son comparables (cambiaron la logica de deteccion o normalizacion).
+
+    Pasa `scoring_version=None` para incluir TODAS las versiones (--include-legacy),
+    o un string concreto para analizar una unica version pasada (--version).
+    Devuelve (df, n_excluidas) para avisar por pantalla.
     """
-    if scoring_version is _CURRENT_VERSION:
-        scoring_version = config.SCORING_VERSION
+    if scoring_version is _COMPATIBLE_VERSIONS:
+        scoring_version = list(config.SCORING_COMPATIBLE_VERSIONS)
+    versions: list[str] | None
+    if scoring_version is None:
+        versions = None
+    elif isinstance(scoring_version, str):
+        versions = [scoring_version]
+    else:
+        versions = list(scoring_version)
+
     conn = storage.connect(DB_PATH)
     try:
         base = (
@@ -75,18 +88,20 @@ def load_alerts(
             "trade_size_usd, price_at_detection, score_total, score_breakdown, bucket_imbalance "
             "FROM alerts WHERE score_total >= ?"
         )
-        params: tuple[Any, ...] = (min_score,)
-        if scoring_version is not None:
+        params: list[Any] = [min_score]
+        if versions is not None:
             # NULL = alertas anteriores a la migracion; se tratan como v1.
-            base += " AND COALESCE(scoring_version, 'v1') = ?"
-            params = (min_score, scoring_version)
-        df = pd.read_sql_query(base + " ORDER BY ts ASC", conn, params=params)
+            placeholders = ", ".join("?" for _ in versions)
+            base += f" AND COALESCE(scoring_version, 'v1') IN ({placeholders})"
+            params.extend(versions)
+        df = pd.read_sql_query(base + " ORDER BY ts ASC", conn, params=tuple(params))
         excluded = 0
-        if scoring_version is not None:
+        if versions is not None:
+            placeholders = ", ".join("?" for _ in versions)
             row = conn.execute(
                 "SELECT COUNT(*) FROM alerts WHERE score_total >= ? "
-                "AND COALESCE(scoring_version, 'v1') != ?",
-                (min_score, scoring_version),
+                f"AND COALESCE(scoring_version, 'v1') NOT IN ({placeholders})",
+                (min_score, *versions),
             ).fetchone()
             excluded = int(row[0]) if row else 0
         return df, excluded
@@ -236,28 +251,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--include-legacy", "--include-v1", dest="include_legacy", action="store_true",
         help="Incluir alertas de TODAS las versiones de scoring. Por defecto solo se "
-             "usa la vigente (config.SCORING_VERSION).",
+             "usan las scoring-compatibles vigentes (config.SCORING_COMPATIBLE_VERSIONS).",
     )
     parser.add_argument(
         "--version", dest="version", default=None,
-        help="Analizar una version de scoring concreta (ej. v5) en vez de la vigente. "
-             "Ignorado si se pasa --include-legacy.",
+        help="Analizar una unica version de scoring concreta (ej. v6) en vez del grupo "
+             "de compatibles. Ignorado si se pasa --include-legacy.",
     )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     if args.include_legacy:
-        scoring_version = None
+        scoring_version: str | list[str] | None = None
+        version_desc = "todas las versiones"
     elif args.version:
         scoring_version = args.version
+        version_desc = args.version
     else:
-        scoring_version = config.SCORING_VERSION
+        scoring_version = list(config.SCORING_COMPATIBLE_VERSIONS)
+        version_desc = "+".join(config.SCORING_COMPATIBLE_VERSIONS) + " (scoring-compatibles)"
     alerts, excluded_legacy = load_alerts(args.min_score, scoring_version)
     if excluded_legacy:
         print(
             f"[aviso] Excluidas {excluded_legacy} alertas: se puntuaron con versiones de "
-            f"scoring distintas de la analizada ({scoring_version}) y no son comparables "
+            f"scoring distintas de las analizadas ({version_desc}) y no son comparables "
             "entre si (cada version cambio la logica de deteccion o normalizacion). "
             "Usa --include-legacy para incluirlas todas, o --version para elegir otra "
             "version concreta (no recomendado para sacar conclusiones)."
