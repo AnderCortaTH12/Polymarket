@@ -24,7 +24,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from src import db
+from src import config, db
 from src.analysis.pnl import format_pnl_cell
 from src.analysis.whales import Whale, politics_portfolio_share, rank_whales
 from src.client.clob import get_price_history
@@ -38,6 +38,7 @@ from src.client.gamma import (
     get_politics_events,
 )
 from src.collector.models import DB_PATH
+from src.dashboard.version_filter import apply_version_filter, version_filter_options
 from src.realtime import storage
 
 # Cuantos mercados (por volumen) se agregan para rankear ballenas. Limitar
@@ -538,23 +539,25 @@ def render_alerts() -> None:
     c1, c2, c3 = st.columns([1, 2, 1])
     min_score = c1.slider("Score mínimo", 0, 100, 0, step=5)
     query = c2.text_input("Buscar mercado (título)", "")
-    solo_v5 = c3.checkbox("Solo v5", value=True,
-                          help="Ocultar las alertas v1-v4 (scorings antiguos, no comparables).")
 
     alerts = load_alerts(min_score, ALERTS_LIMIT)
     if not alerts.empty and query:
         alerts = alerts[alerts["market_question"].fillna("").str.contains(query, case=False)]
 
-    n_legacy = int((alerts["scoring_version"] != "v5").sum()) if not alerts.empty else 0
-    if solo_v5 and not alerts.empty:
-        alerts = alerts[alerts["scoring_version"] == "v5"]
-    if n_legacy:
+    available_versions = alerts["scoring_version"].dropna().unique().tolist() if not alerts.empty else []
+    version_options = version_filter_options(available_versions)
+    version_choice = c3.selectbox(
+        "Versión", version_options, index=0,
+        help="«Compatibles» (por defecto) son las versiones que comparten exactamente "
+             "la misma lógica de scoring y se pueden analizar juntas. Elige una versión "
+             "concreta para aislarla, o «Todas» para no filtrar.",
+    )
+    alerts, n_excluded = apply_version_filter(alerts, version_choice)
+    if n_excluded:
         st.warning(
-            f"{n_legacy} alertas son **v1-v4**: scorings antiguos y no comparables "
-            "(v1 perfilado inactivo; v2 track_record sobre un win_rate falso; v3 sin "
-            "veto de relevancia; v4 con el score SIN normalizar). El score v5 es un "
-            "porcentaje 0-100 normalizado; no lo mezcles con los brutos anteriores."
-            + ("" if solo_v5 else " Están visibles porque desmarcaste «Solo v5».")
+            f"{n_excluded} alertas quedaron fuera del filtro de versión «{version_choice}» "
+            "(scorings distintos, no siempre comparables entre sí: cambian la lógica de "
+            "detección o de normalización). Cambia el selector de versión para incluirlas."
         )
 
     if alerts.empty:
